@@ -1,0 +1,21 @@
+{
+	"compilerOptions": {
+		"module": "Node16",
+		"target": "ES2022",
+		"outDir": "out",
+		"lib": [
+			"ES2022",
+			"DOM"
+		],
+		"types": [
+			"node",
+			"vscode",
+			"mocha"
+		],
+		"sourceMap": true,
+		"rootDir": "src",
+		"strict": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true
+	}
+}
