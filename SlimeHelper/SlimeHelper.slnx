@@ -1,3 +1,4 @@
 <Solution>
+  <Project Path="../SlimeCli/SlimeCli.csproj" Id="1a967315-76b9-4540-8bcd-854e1b169ebe" />
   <Project Path="SlimeHelper.csproj" />
 </Solution>

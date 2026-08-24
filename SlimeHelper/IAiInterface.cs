@@ -1,19 +1,19 @@
-﻿//var url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={apiKey}";
-using System.IO;
+﻿using System.IO;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+
 namespace SlimeHelper
 {
     public class ChatMessage
     {
-        public string role { get; set; }
-        public List<Part> parts { get; set; }
+        public string role { get; set; } = "";
+        public List<Part> parts { get; set; } = [];
     }
 
     public class Part
     {
-        public string text { get; set; }
+        public string text { get; set; } = "";
     }
 
     public interface IAiProvider
@@ -23,10 +23,10 @@ namespace SlimeHelper
 
     public class GeminiProvider : IAiProvider
     {
-        private static List<ChatMessage> _history = new List<ChatMessage>();
-
+        private static readonly JsonSerializerOptions JsonIndentOptions = new() { WriteIndented = true };
+        private static readonly List<ChatMessage> _history = [];
         private static readonly string MemoryFilePath = Path.Combine(Path.GetTempPath(), "slime_memory.json");
-        private static SlimeMemory _memory = new SlimeMemory();
+        private static SlimeMemory _memory = new();
 
         public GeminiProvider()
         {
@@ -35,11 +35,9 @@ namespace SlimeHelper
 
         public async Task<string> GetResponseAsync(string prompt, string apiKey)
         {
-
-            string lowerPrompt = prompt.ToLower();
-            if (lowerPrompt.StartsWith("remember that "))
+            if (prompt.StartsWith("remember that ", StringComparison.OrdinalIgnoreCase))
             {
-                string fact = prompt.Substring(14).Trim();
+                string fact = prompt[14..].Trim();
                 if (!_memory.Facts.Contains(fact))
                 {
                     _memory.Facts.Add(fact);
@@ -58,13 +56,13 @@ namespace SlimeHelper
             var newUserMessage = new ChatMessage
             {
                 role = "user",
-                parts = new List<Part> { new Part { text = prompt } }
+                parts = [new Part { text = prompt }]
             };
 
             var requestBody = new
             {
                 system_instruction = new { parts = new[] { new { text = dynamicInstruction } } },
-                contents = _history.Concat(new[] { newUserMessage }).ToArray()
+                contents = _history.Concat([newUserMessage]).ToArray()
             };
 
             var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
@@ -79,23 +77,30 @@ namespace SlimeHelper
 
                 if (root.TryGetProperty("error", out var errorElement))
                 {
-                    string msg = errorElement.GetProperty("message").GetString();
-                    if (msg.Contains("Quota exceeded"))
+                    string msg = errorElement.TryGetProperty("message", out var m) ? m.GetString() ?? "Unknown error" : "Unknown error";
+                    if (msg.Contains("Quota exceeded", StringComparison.OrdinalIgnoreCase))
                     {
                         return "I'm a bit tired from all the thinking! Give me a minute to rest my slime-brain... 😴";
                     }
                     return "API Error: " + msg;
                 }
 
-                var aiText = root.GetProperty("candidates")[0]
-                                 .GetProperty("content")
-                                 .GetProperty("parts")[0]
-                                 .GetProperty("text")
-                                 .GetString();
+                if (root.TryGetProperty("candidates", out var candidates) && candidates.GetArrayLength() > 0)
+                {
+                    string? aiText = candidates[0]
+                                     .GetProperty("content")
+                                     .GetProperty("parts")[0]
+                                     .GetProperty("text")
+                                     .GetString();
 
-                AddToHistory(prompt, aiText);
+                    if (!string.IsNullOrEmpty(aiText))
+                    {
+                        AddToHistory(prompt, aiText);
+                        return aiText;
+                    }
+                }
 
-                return aiText;
+                return "I received an empty response from Gemini.";
             }
             catch (Exception ex)
             {
@@ -103,7 +108,7 @@ namespace SlimeHelper
             }
         }
 
-        private void LoadMemory()
+        private static void LoadMemory()
         {
             if (File.Exists(MemoryFilePath))
             {
@@ -116,20 +121,20 @@ namespace SlimeHelper
             }
         }
 
-        private void SaveMemory()
+        private static void SaveMemory()
         {
             try
             {
-                string json = JsonSerializer.Serialize(_memory, new JsonSerializerOptions { WriteIndented = true });
+                string json = JsonSerializer.Serialize(_memory, JsonIndentOptions);
                 File.WriteAllText(MemoryFilePath, json);
             }
             catch (Exception ex) { Console.WriteLine("Save error: " + ex.Message); }
         }
 
-        private void AddToHistory(string userPrompt, string aiResponse)
+        private static void AddToHistory(string userPrompt, string aiResponse)
         {
-            _history.Add(new ChatMessage { role = "user", parts = new List<Part> { new Part { text = userPrompt } } });
-            _history.Add(new ChatMessage { role = "model", parts = new List<Part> { new Part { text = aiResponse } } });
+            _history.Add(new ChatMessage { role = "user", parts = [new Part { text = userPrompt }] });
+            _history.Add(new ChatMessage { role = "model", parts = [new Part { text = aiResponse }] });
 
             if (_history.Count > 10)
             {
@@ -140,25 +145,24 @@ namespace SlimeHelper
         public static List<ChatMessage> GetHistory() => _history;
     }
 
-    //Claude!!
-
+    // Claude Provider
     public class ClaudeProvider : IAiProvider
     {
-        private static List<ChatMessage> _history = new List<ChatMessage>();
-
+        private static readonly JsonSerializerOptions JsonIndentOptions = new() { WriteIndented = true };
+        private static readonly List<ChatMessage> _history = [];
         private static readonly string MemoryFilePath = Path.Combine(Path.GetTempPath(), "slime_memory.json");
-        private static SlimeMemory _memory = new SlimeMemory();
+        private static SlimeMemory _memory = new();
 
         public ClaudeProvider()
         {
             LoadMemory();
         }
+
         public async Task<string> GetResponseAsync(string prompt, string apiKey)
         {
-            string lowerPrompt = prompt.ToLower();
-            if (lowerPrompt.StartsWith("remember that "))
+            if (prompt.StartsWith("remember that ", StringComparison.OrdinalIgnoreCase))
             {
-                string fact = prompt.Substring(14).Trim();
+                string fact = prompt[14..].Trim();
                 if (!_memory.Facts.Contains(fact))
                 {
                     _memory.Facts.Add(fact);
@@ -168,7 +172,7 @@ namespace SlimeHelper
             }
 
             using var client = new HttpClient();
-            var url = $"https://api.anthropic.com/v1/messages";
+            var url = "https://api.anthropic.com/v1/messages";
 
             string factsString = string.Join(", ", _memory.Facts);
             string dynamicInstruction = $"You are a sassy anime slime assistant. User: {_memory.UserName}. " +
@@ -185,10 +189,10 @@ namespace SlimeHelper
                 messages = _history.Select(h => new
                 {
                     role = h.role == "model" ? "assistant" : "user",
-                    content = h.parts[0].text
-                }).Concat(new[] {
+                    content = h.parts.Count > 0 ? h.parts[0].text : ""
+                }).Concat([
                     new { role = "user", content = prompt }
-                }).ToArray()
+                ]).ToArray()
             };
 
             var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
@@ -201,13 +205,26 @@ namespace SlimeHelper
                 using var doc = JsonDocument.Parse(jsonResponse);
                 var root = doc.RootElement;
 
-                // Claude returnerar texten i 'content[0].text'
-                var aiText = root.GetProperty("content")[0]
-                                 .GetProperty("text")
-                                 .GetString();
+                if (root.TryGetProperty("error", out var errorElement))
+                {
+                    string msg = errorElement.TryGetProperty("message", out var m) ? m.GetString() ?? "Unknown error" : "Unknown error";
+                    return "API Error: " + msg;
+                }
 
-                AddToHistory(prompt, aiText);
-                return aiText;
+                if (root.TryGetProperty("content", out var contentArray) && contentArray.GetArrayLength() > 0)
+                {
+                    string? aiText = contentArray[0]
+                                     .GetProperty("text")
+                                     .GetString();
+
+                    if (!string.IsNullOrEmpty(aiText))
+                    {
+                        AddToHistory(prompt, aiText);
+                        return aiText;
+                    }
+                }
+
+                return "I received an empty response from Claude.";
             }
             catch (Exception ex)
             {
@@ -215,7 +232,7 @@ namespace SlimeHelper
             }
         }
 
-        private void LoadMemory()
+        private static void LoadMemory()
         {
             if (File.Exists(MemoryFilePath))
             {
@@ -228,20 +245,20 @@ namespace SlimeHelper
             }
         }
 
-        private void SaveMemory()
+        private static void SaveMemory()
         {
             try
             {
-                string json = JsonSerializer.Serialize(_memory, new JsonSerializerOptions { WriteIndented = true });
+                string json = JsonSerializer.Serialize(_memory, JsonIndentOptions);
                 File.WriteAllText(MemoryFilePath, json);
             }
             catch (Exception ex) { Console.WriteLine("Save error: " + ex.Message); }
         }
 
-        private void AddToHistory(string userPrompt, string aiResponse)
+        private static void AddToHistory(string userPrompt, string aiResponse)
         {
-            _history.Add(new ChatMessage { role = "user", parts = new List<Part> { new Part { text = userPrompt } } });
-            _history.Add(new ChatMessage { role = "model", parts = new List<Part> { new Part { text = aiResponse } } });
+            _history.Add(new ChatMessage { role = "user", parts = [new Part { text = userPrompt }] });
+            _history.Add(new ChatMessage { role = "model", parts = [new Part { text = aiResponse }] });
 
             if (_history.Count > 10)
             {
@@ -251,5 +268,4 @@ namespace SlimeHelper
 
         public static List<ChatMessage> GetHistory() => _history;
     }
-
 }

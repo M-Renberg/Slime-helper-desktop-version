@@ -9,10 +9,11 @@ namespace SlimeHelper
     {
         public static string Show(string title, string prompt, string defaultValue = "")
         {
-            var slimeBeige = (Brush)new System.Windows.Media.BrushConverter().ConvertFromString("#F5F5DC");
-            var slimeBorder = (Brush)new System.Windows.Media.BrushConverter().ConvertFromString("#8B4513");
+            var brushConverter = new BrushConverter();
+            var slimeBeige = brushConverter.ConvertFromString("#F5F5DC") as Brush ?? Brushes.Beige;
+            var slimeBorder = brushConverter.ConvertFromString("#8B4513") as Brush ?? Brushes.SaddleBrown;
 
-            Window window = new Window
+            Window window = new()
             {
                 Title = title,
                 Width = 420,
@@ -25,17 +26,17 @@ namespace SlimeHelper
                 AllowsTransparency = true
             };
 
-            Border mainBorder = new Border
+            Border mainBorder = new()
             {
                 Background = slimeBeige,
-                BorderBrush = Brushes.Black,
+                BorderBrush = slimeBorder,
                 BorderThickness = new Thickness(2),
                 CornerRadius = new CornerRadius(15),
                 Padding = new Thickness(20)
             };
             mainBorder.Effect = new DropShadowEffect { BlurRadius = 15, ShadowDepth = 5, Opacity = 0.4 };
 
-            StackPanel stackPanel = new StackPanel();
+            StackPanel stackPanel = new();
 
             // Header
             stackPanel.Children.Add(new TextBlock
@@ -47,7 +48,7 @@ namespace SlimeHelper
                 Foreground = Brushes.DarkSlateGray
             });
 
-            Border textBorder = new Border
+            Border textBorder = new()
             {
                 Background = Brushes.White,
                 BorderBrush = Brushes.Gray,
@@ -55,7 +56,7 @@ namespace SlimeHelper
                 CornerRadius = new CornerRadius(5),
                 Padding = new Thickness(5)
             };
-            TextBox textBox = new TextBox
+            TextBox textBox = new()
             {
                 Text = defaultValue,
                 BorderThickness = new Thickness(0),
@@ -65,11 +66,11 @@ namespace SlimeHelper
             textBorder.Child = textBox;
             stackPanel.Children.Add(textBorder);
 
-            Grid buttonGrid = new Grid { Margin = new Thickness(0, 20, 0, 0) };
+            Grid buttonGrid = new() { Margin = new Thickness(0, 20, 0, 0) };
             buttonGrid.ColumnDefinitions.Add(new ColumnDefinition());
             buttonGrid.ColumnDefinitions.Add(new ColumnDefinition());
 
-            Button saveBtn = new Button
+            Button saveBtn = new()
             {
                 Content = "Memorize Key",
                 Padding = new Thickness(10, 8, 10, 8),
@@ -79,7 +80,7 @@ namespace SlimeHelper
                 Margin = new Thickness(0, 0, 5, 0)
             };
 
-            Button cancelBtn = new Button
+            Button cancelBtn = new()
             {
                 Content = "Cancel",
                 Padding = new Thickness(10, 8, 10, 8),
@@ -105,7 +106,8 @@ namespace SlimeHelper
             {
                 return textBox.Text;
             }
-            return null;
+
+            return string.Empty;
         }
     }
 }

@@ -87,12 +87,21 @@
                     <TextBlock Text="📓"/>
                 </MenuItem.Icon>
             </MenuItem>
+
+            <Separator/>
+            
             <MenuItem Header="Set Repositories Folder" Click="OnSetReposPathClick">
                 <MenuItem.Icon>
                     <TextBlock Text="📁"/>
                 </MenuItem.Icon>
             </MenuItem>
-            
+
+            <Separator/>
+            <MenuItem Header="Install CLI to PATH" Click="InstallCliToPath_Click">
+                <MenuItem.Icon>
+                    <TextBlock Text="💻"/>
+                </MenuItem.Icon>
+            </MenuItem>
             <Separator/>
 
             <MenuItem Header="Shut down Slime" Click="CloseApp">
@@ -164,20 +173,20 @@
                     <BeginStoryboard>
                         <Storyboard RepeatBehavior="Forever" AutoReverse="True">
                             <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)"
-                                     From="1.0" To="0.95" Duration="0:0:1.8">
+                                     From="1.0" To="0.99" Duration="0:0:1.8">
                                 <DoubleAnimation.EasingFunction>
                                     <BackEase EasingMode="EaseOut" Amplitude="0.5"/>
                                 </DoubleAnimation.EasingFunction>
                             </DoubleAnimation>
 
                             <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)"
-                                     From="1.0" To="1.05" Duration="0:0:2.2">
+                                     From="1.0" To="1.01" Duration="0:0:2.2">
                                 <DoubleAnimation.EasingFunction>
                                     <BackEase EasingMode="EaseOut" Amplitude="0.5"/>
                                 </DoubleAnimation.EasingFunction>
                             </DoubleAnimation>
                             <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)"
-                     From="0" To="-3" Duration="0:0:0.8">
+                     From="0" To="-1" Duration="0:0:0.8">
                                 <DoubleAnimation.EasingFunction>
                                     <SineEase EasingMode="EaseInOut"/>
                                 </DoubleAnimation.EasingFunction>

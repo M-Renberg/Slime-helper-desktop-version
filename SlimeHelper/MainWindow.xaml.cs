@@ -31,6 +31,7 @@ namespace SlimeHelper
         // Animation State Machine variabler
         private CancellationTokenSource? _animationCts;
         private readonly Dictionary<string, AnimationProfile> _animationProfiles = [];
+        private string _currentPlayingState = "";
 
         public MainWindow()
         {
@@ -84,6 +85,7 @@ namespace SlimeHelper
             };
 
             SetupCommandWatcher();
+            ShowSlimeReaction("IDLE", "");
             RunStatusCheck();
         }
 
@@ -137,17 +139,33 @@ namespace SlimeHelper
 
         private async Task PlayAnimationLoop(string stateKey)
         {
-            _animationCts?.Cancel();
-            _animationCts = new CancellationTokenSource();
-            var token = _animationCts.Token;
-
             stateKey = stateKey.ToUpperInvariant();
 
             if (!_animationProfiles.ContainsKey(stateKey))
             {
                 if (_animationProfiles.ContainsKey("IDLE")) stateKey = "IDLE";
-                else return;
+                else
+                {
+                    // Fallback om inga mappar hittas alls
+                    Dispatcher.Invoke(() =>
+                    {
+                        string fallback = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Images", "slime_idle.png");
+                        if (File.Exists(fallback)) UpdateImage(fallback, false);
+                    });
+                    return;
+                }
             }
+
+            if (_currentPlayingState == stateKey && _animationCts != null && !_animationCts.IsCancellationRequested)
+            {
+                return;
+            }
+
+            _currentPlayingState = stateKey;
+
+            _animationCts?.Cancel();
+            _animationCts = new CancellationTokenSource();
+            var token = _animationCts.Token;
 
             var profile = _animationProfiles[stateKey];
             if (profile.Frames.Count == 0) return;
@@ -364,7 +382,9 @@ namespace SlimeHelper
                 var data = JsonSerializer.Deserialize<SlimeData>(jsonContent);
                 if (data is null) return;
 
-                if (data.status != lastStatus)
+                bool statusChanged = data.status != lastStatus;
+
+                if (statusChanged)
                 {
                     switch (data.status)
                     {
@@ -426,7 +446,10 @@ namespace SlimeHelper
                     SpeechBubble.Visibility = Visibility.Collapsed;
                 }
 
-                ShowSlimeReaction(data.status, "");
+                if (statusChanged)
+                {
+                    ShowSlimeReaction(data.status, "");
+                }
             }
             catch { }
         }
@@ -542,6 +565,43 @@ namespace SlimeHelper
             SpeechText.Text = "Gemini key saved to my settings! ✨";
             SpeechBubble.Visibility = Visibility.Visible;
             PlaySounds("Idle.wav");
+        }
+
+        private void InstallCliToPath_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string sourceExe = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "slime.exe");
+                if (!File.Exists(sourceExe))
+                {
+                    ShowSlimeReaction("ERROR", "slime.exe was not found in the application directory.");
+                    return;
+                }
+
+                // 1. Skapa en lokal mapp för CLI-verktyget
+                string targetDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SlimeHelper", "bin");
+                Directory.CreateDirectory(targetDir);
+
+                string targetExe = Path.Combine(targetDir, "slime.exe");
+                File.Copy(sourceExe, targetExe, true);
+
+                // 2. Hämta nuvarande User PATH och lägg till mappen om den saknas
+                string currentPath = Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.User) ?? "";
+                var paths = currentPath.Split(';', StringSplitOptions.RemoveEmptyEntries).ToList();
+
+                if (!paths.Any(p => string.Equals(p.Trim(), targetDir, StringComparison.OrdinalIgnoreCase)))
+                {
+                    paths.Add(targetDir);
+                    string newPath = string.Join(";", paths);
+                    Environment.SetEnvironmentVariable("Path", newPath, EnvironmentVariableTarget.User);
+                }
+
+                ShowSlimeReaction("FUNNY", "CLI installed! Restart your terminal and run 'slime help'.");
+            }
+            catch (Exception ex)
+            {
+                ShowSlimeReaction("ERROR", $"Failed to install CLI: {ex.Message}");
+            }
         }
 
         private async void ProcessAiRequest(string prompt)
