@@ -150,6 +150,11 @@ namespace SlimeHelper
                    path.Contains("obj") || path.Contains("node_modules") || path.Contains(".obsidian");
         }
 
-        public void Dispose() => _watcher?.Dispose();
+        public void Dispose()
+        {
+            _watcher?.Dispose();
+            GC.SuppressFinalize(this);
+        }
+
     }
 }

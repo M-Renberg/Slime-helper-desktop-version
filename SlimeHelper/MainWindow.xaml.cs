@@ -11,36 +11,40 @@ namespace SlimeHelper
 {
     public partial class MainWindow : Window
     {
-        private string statusFilePath;
-        private DispatcherTimer checkTimer;
-        private bool isInteracting = false;
-        private Random rng = new Random();
+        private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+
+        private readonly string statusFilePath;
+        private readonly DispatcherTimer checkTimer;
+        private bool isInteracting;
+        private readonly Random rng = new();
         private string lastStatus = "";
         private double currentVolume = 0.5;
-        private MediaPlayer mediaPlayer = new MediaPlayer();
+        private readonly MediaPlayer mediaPlayer = new();
         private Point startWindowPos;
         private string currentSkin = "Default";
-        private string settingsPath = Path.Combine(Path.GetTempPath(), "slime_settings.json");
+        private readonly string settingsPath = Path.Combine(Path.GetTempPath(), "slime_settings.json");
 
         private readonly ActivityWatcher _activityWatcher = new();
         private readonly CodeWatcherService _codeWatcher = new();
-        private FileSystemWatcher _cliCommandWatcher;
+        private FileSystemWatcher? _cliCommandWatcher;
 
         // Animation State Machine variabler
         private CancellationTokenSource? _animationCts;
-        private Dictionary<string, AnimationProfile> _animationProfiles = new();
+        private readonly Dictionary<string, AnimationProfile> _animationProfiles = [];
 
         public MainWindow()
         {
             InitializeComponent();
             LoadSettings();
-            LoadAnimations(); // Läs in alla mappar och bilder
+            LoadAnimations();
             var settings = LoadFullSettings();
 
             statusFilePath = Path.Combine(Path.GetTempPath(), "slime_status.txt");
 
-            checkTimer = new DispatcherTimer();
-            checkTimer.Interval = TimeSpan.FromSeconds(1);
+            checkTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(1)
+            };
             checkTimer.Tick += CheckStatus;
             checkTimer.Start();
 
@@ -53,16 +57,16 @@ namespace SlimeHelper
             }
 
             // Drag function
-            this.MouseLeftButtonDown += (s, e) =>
+            MouseLeftButtonDown += (s, e) =>
             {
-                startWindowPos = new Point(this.Left, this.Top);
-                this.DragMove();
+                startWindowPos = new Point(Left, Top);
+                DragMove();
             };
 
-            this.MouseLeftButtonUp += (s, e) =>
+            MouseLeftButtonUp += (s, e) =>
             {
-                double distanceMoved = Math.Abs(this.Left - startWindowPos.X)
-                                     + Math.Abs(this.Top - startWindowPos.Y);
+                double distanceMoved = Math.Abs(Left - startWindowPos.X)
+                                     + Math.Abs(Top - startWindowPos.Y);
 
                 if (distanceMoved < 5)
                 {
@@ -71,16 +75,16 @@ namespace SlimeHelper
             };
 
             // Open menu
-            this.MouseRightButtonUp += (s, e) =>
+            MouseRightButtonUp += (s, e) =>
             {
-                if (this.ContextMenu != null)
+                if (ContextMenu is not null)
                 {
-                    this.ContextMenu.IsOpen = true;
+                    ContextMenu.IsOpen = true;
                 }
             };
 
             SetupCommandWatcher();
-            CheckStatus(null, null);
+            RunStatusCheck();
         }
 
         // --- SLIME ANIMATIONS LOGIC ---
@@ -94,9 +98,8 @@ namespace SlimeHelper
 
             foreach (var stateDir in Directory.GetDirectories(basePath))
             {
-                string stateName = new DirectoryInfo(stateDir).Name.ToUpper();
+                string stateName = new DirectoryInfo(stateDir).Name.ToUpperInvariant();
 
-                // Hämta alla PNG-filer och sortera dem i bokstavs/nummer-ordning
                 var files = Directory.GetFiles(stateDir, "*.png").OrderBy(f => f).ToList();
                 if (files.Count == 0) continue;
 
@@ -104,10 +107,9 @@ namespace SlimeHelper
 
                 if (stateName == "IDLE")
                 {
-                    profile.FrameDelayMs = 200; // Lite lugnare andning
-                    profile.LoopDelayMs = 3000; // Pausa 3 sekunder efter ett andetag
+                    profile.FrameDelayMs = 200;
+                    profile.LoopDelayMs = 3000;
 
-                    // Bygg Ping-Pong (ex: 01, 02, 03, 04 -> lägg till 03, 02)
                     if (files.Count >= 3)
                     {
                         var pingPong = new List<string>(files);
@@ -120,13 +122,13 @@ namespace SlimeHelper
                 }
                 else if (stateName == "BLINK")
                 {
-                    profile.FrameDelayMs = 150; // Snabbt blink
+                    profile.FrameDelayMs = 150;
                     profile.LoopDelayMs = 0;
                 }
                 else
                 {
-                    profile.FrameDelayMs = 150; // Snabbare loop för andra reaktioner (Poke, Error etc)
-                    profile.LoopDelayMs = 0;    // Loopa direkt utan paus
+                    profile.FrameDelayMs = 150;
+                    profile.LoopDelayMs = 0;
                 }
 
                 _animationProfiles[stateName] = profile;
@@ -135,18 +137,16 @@ namespace SlimeHelper
 
         private async Task PlayAnimationLoop(string stateKey)
         {
-            // Avbryt den pågående animationen
             _animationCts?.Cancel();
             _animationCts = new CancellationTokenSource();
             var token = _animationCts.Token;
 
-            stateKey = stateKey.ToUpper();
+            stateKey = stateKey.ToUpperInvariant();
 
-            // Fallback till IDLE om det begärda tillståndet saknar en mapp
             if (!_animationProfiles.ContainsKey(stateKey))
             {
                 if (_animationProfiles.ContainsKey("IDLE")) stateKey = "IDLE";
-                else return; // Inga animationer inlästa
+                else return;
             }
 
             var profile = _animationProfiles[stateKey];
@@ -158,28 +158,22 @@ namespace SlimeHelper
             {
                 while (!token.IsCancellationRequested)
                 {
-                    // 1. Spela huvud-animationen (T.ex. IDLE andning)
                     foreach (var framePath in profile.Frames)
                     {
                         token.ThrowIfCancellationRequested();
 
-                        // Fade på första bilden, sedan byts bilderna omedelbart i loopen
                         Dispatcher.Invoke(() => UpdateImage(framePath, isFirstFrame));
                         isFirstFrame = false;
 
                         await Task.Delay(profile.FrameDelayMs, token);
                     }
 
-                    // 2. Hantera pauser och Idle Variations (Blinking)
                     if (stateKey == "IDLE")
                     {
-                        // Vänta standard-pausen för andningen
                         await Task.Delay(profile.LoopDelayMs, token);
 
-                        // Slå tärning: 30% chans att blinka
                         if (!isInteracting && rng.Next(0, 10) < 3 && _animationProfiles.TryGetValue("BLINK", out var blinkProfile) && blinkProfile.Frames.Count > 0)
                         {
-                            // Spela blink-animationen en gång utan fade
                             foreach (var blinkFrame in blinkProfile.Frames)
                             {
                                 token.ThrowIfCancellationRequested();
@@ -187,20 +181,17 @@ namespace SlimeHelper
                                 await Task.Delay(blinkProfile.FrameDelayMs, token);
                             }
 
-                            // Liten extra paus efter blinkningen innan andningen börjar om
                             await Task.Delay(500, token);
                         }
                     }
                     else if (profile.LoopDelayMs > 0)
                     {
-                        // Om det är något annat tillstånd som har en paus inlagd
                         await Task.Delay(profile.LoopDelayMs, token);
                     }
                 }
             }
             catch (TaskCanceledException)
             {
-                // Fångas när ett nytt tillstånd anropas - helt enligt planen!
             }
         }
 
@@ -222,7 +213,7 @@ namespace SlimeHelper
 
             if (useFade)
             {
-                DoubleAnimation fadeOut = new DoubleAnimation
+                var fadeOut = new DoubleAnimation
                 {
                     To = 0.0,
                     Duration = TimeSpan.FromMilliseconds(150)
@@ -231,21 +222,20 @@ namespace SlimeHelper
                 fadeOut.Completed += (s, e) =>
                 {
                     SlimeImage.Source = bitmap;
-                    DoubleAnimation fadeIn = new DoubleAnimation
+                    var fadeIn = new DoubleAnimation
                     {
                         From = 0.0,
-                        To = 0.6, // Matchar Opacity="0.6" i XAML
+                        To = 0.6,
                         Duration = TimeSpan.FromMilliseconds(150)
                     };
-                    SlimeImage.BeginAnimation(Image.OpacityProperty, fadeIn);
+                    SlimeImage.BeginAnimation(OpacityProperty, fadeIn);
                 };
 
-                SlimeImage.BeginAnimation(Image.OpacityProperty, fadeOut);
+                SlimeImage.BeginAnimation(OpacityProperty, fadeOut);
             }
             else
             {
-                // Rensa eventuella pågående animeringar och sätt bilden direkt (Instant)
-                SlimeImage.BeginAnimation(Image.OpacityProperty, null);
+                SlimeImage.BeginAnimation(OpacityProperty, null);
                 SlimeImage.Opacity = 0.6;
                 SlimeImage.Source = bitmap;
             }
@@ -285,46 +275,36 @@ namespace SlimeHelper
 
             PlaySounds("Poke.wav");
 
-            string[] PokePhrase;
-
-            switch (currentSkin)
+            string[] pokePhrase = currentSkin switch
             {
-                case "Green":
-                    PokePhrase = new string[]
-                    {
-                        "Don't poke me!", "You'll get green goo on your cursor", "Wobble, Wobble",
-                        "Do I look like a jelly shot?", "I'm melting! I'm melting!", "Maybe we should go back to coding?",
-                        "Remember to drink water!", "JS or TS? That the question...", "POKE-E-MON", "Slime!", "Why are you poking me?!?!"
-                    };
-                    break;
-                case "Pink":
-                    PokePhrase = new string[]
-                    {
-                        "Fluffy!", "Pink and cute", "Wanna take a break?", "Flowers and butterflies",
-                        "Don't poke me so hard!", "My antennas", "Bubble, Bubble", "I'm just chilling here!",
-                        "Your code is beautiful!", "Did we fix that bug?", "We should use a pink theme!"
-                    };
-                    break;
-                case "Girl":
-                    PokePhrase = new string[]
-                    {
-                        "Don't poke me!", "Cute and Squishy", "Wanna take a break?", "Hey, cut it out!",
-                        "You make me wooble", "I'm gonna melt into the CPU", "Be nice mister", "I'm just chilling here!",
-                        "Your code is beautiful!", "Did we fix that bug?", "Maybe try to get some work done?"
-                    };
-                    break;
-                default:
-                    PokePhrase = new string[]
-                    {
-                        "Don't poke me!", "Get back to coding!", "Careful! I'm squishy...", "Is it time for a break?",
-                        "You should focus on your code", "Hey! Don't do that!", "I want cake...", "Squish!",
-                        "Maybe just one more poke?", "Have you saved and commited your code?", "Slime is doing slime stuff"
-                    };
-                    break;
-            }
+                "Green" =>
+                [
+                    "Don't poke me!", "You'll get green goo on your cursor", "Wobble, Wobble",
+                    "Do I look like a jelly shot?", "I'm melting! I'm melting!", "Maybe we should go back to coding?",
+                    "Remember to drink water!", "JS or TS? That the question...", "POKE-E-MON", "Slime!", "Why are you poking me?!?!"
+                ],
+                "Pink" =>
+                [
+                    "Fluffy!", "Pink and cute", "Wanna take a break?", "Flowers and butterflies",
+                    "Don't poke me so hard!", "My antennas", "Bubble, Bubble", "I'm just chilling here!",
+                    "Your code is beautiful!", "Did we fix that bug?", "We should use a pink theme!"
+                ],
+                "Girl" =>
+                [
+                    "Don't poke me!", "Cute and Squishy", "Wanna take a break?", "Hey, cut it out!",
+                    "You make me wooble", "I'm gonna melt into the CPU", "Be nice mister", "I'm just chilling here!",
+                    "Your code is beautiful!", "Did we fix that bug?", "Maybe try to get some work done?"
+                ],
+                _ =>
+                [
+                    "Don't poke me!", "Get back to coding!", "Careful! I'm squishy...", "Is it time for a break?",
+                    "You should focus on your code", "Hey! Don't do that!", "I want cake...", "Squish!",
+                    "Maybe just one more poke?", "Have you saved and commited your code?", "Slime is doing slime stuff"
+                ]
+            };
 
-            int index = rng.Next(PokePhrase.Length);
-            SpeechText.Text = PokePhrase[index];
+            int index = rng.Next(pokePhrase.Length);
+            SpeechText.Text = pokePhrase[index];
             SpeechText.Foreground = Brushes.Black;
             SpeechBubble.Visibility = Visibility.Visible;
 
@@ -335,13 +315,18 @@ namespace SlimeHelper
             {
                 isInteracting = false;
                 SpeechBubble.Visibility = Visibility.Collapsed;
-                CheckStatus(null, null);
+                RunStatusCheck();
                 resetTimer.Stop();
             };
             resetTimer.Start();
         }
 
-        private void CheckStatus(object sender, EventArgs e)
+        private void CheckStatus(object? sender, EventArgs e)
+        {
+            RunStatusCheck();
+        }
+
+        private void RunStatusCheck()
         {
             if (isInteracting) return;
 
@@ -356,13 +341,13 @@ namespace SlimeHelper
                         if (command == "OPEN_NOTES")
                         {
                             File.WriteAllText(commandFile, "");
-                            OnViewNotesClick(null, null);
+                            TriggerOpenNotes();
                             return;
                         }
-                        else if (command.StartsWith("ASK_AI:"))
+                        else if (command.StartsWith("ASK_AI:", StringComparison.OrdinalIgnoreCase))
                         {
                             File.WriteAllText(commandFile, "");
-                            string prompt = command.Replace("ASK_AI:", "");
+                            string prompt = command[7..];
                             ProcessAiRequest(prompt);
                             return;
                         }
@@ -377,7 +362,7 @@ namespace SlimeHelper
             {
                 string jsonContent = File.ReadAllText(statusFilePath).Trim();
                 var data = JsonSerializer.Deserialize<SlimeData>(jsonContent);
-                if (data == null) return;
+                if (data is null) return;
 
                 if (data.status != lastStatus)
                 {
@@ -390,7 +375,7 @@ namespace SlimeHelper
                             PlaySounds("Poke.wav"); break;
                         case "IDLE":
                             if (lastStatus == "AFK") PlaySounds("Poke.wav");
-                            else if (lastStatus == "ERROR" || lastStatus == "WARNING") PlaySounds("Idle.wav");
+                            else if (lastStatus is "ERROR" or "WARNING") PlaySounds("Idle.wav");
                             break;
                     }
                     lastStatus = data.status;
@@ -405,7 +390,7 @@ namespace SlimeHelper
                     {
                         var now = DateTime.Now;
 
-                        if (now.Hour >= 23 || now.Hour < 5)
+                        if (now.Hour is >= 23 or < 5)
                         {
                             SpeechText.Text = "It's late. Slime is tired...";
                             data.status = "TIRED";
@@ -420,7 +405,7 @@ namespace SlimeHelper
                             SpeechText.Text = "Monday... need coffee... ";
                             data.status = "TIRED";
                         }
-                        else if (now.DayOfWeek == DayOfWeek.Saturday || now.DayOfWeek == DayOfWeek.Sunday)
+                        else if (now.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
                         {
                             if (rng.Next(0, 10) == 0)
                             {
@@ -429,16 +414,18 @@ namespace SlimeHelper
                         }
                     }
 
-                    if (data.status == "ERROR") SpeechText.Foreground = Brushes.Red;
-                    else if (data.status == "WARNING") SpeechText.Foreground = Brushes.DarkOrange;
-                    else SpeechText.Foreground = Brushes.Black;
+                    SpeechText.Foreground = data.status switch
+                    {
+                        "ERROR" => Brushes.Red,
+                        "WARNING" => Brushes.DarkOrange,
+                        _ => Brushes.Black
+                    };
                 }
                 else
                 {
                     SpeechBubble.Visibility = Visibility.Collapsed;
                 }
 
-                // Anropa State Machine med det nya tillståndet
                 ShowSlimeReaction(data.status, "");
             }
             catch { }
@@ -448,21 +435,20 @@ namespace SlimeHelper
         {
             if (sender is MenuItem item)
             {
-                currentSkin = item.Tag.ToString() ?? "Default";
+                currentSkin = item.Tag?.ToString() ?? "Default";
                 SaveSettings();
-                string greeting;
 
-                switch (currentSkin)
+                string greeting = currentSkin switch
                 {
-                    case "Green": greeting = "Goo-morning! Let's melt some bugs."; break;
-                    case "Pink": greeting = "Fabulous! I feel... different."; break;
-                    case "Girl": greeting = "I'm ready! Let's go!"; break;
-                    default: greeting = "I'm blue dabidi dabida."; break;
-                }
+                    "Green" => "Goo-morning! Let's melt some bugs.",
+                    "Pink" => "Fabulous! I feel... different.",
+                    "Girl" => "I'm ready! Let's go!",
+                    _ => "I'm blue dabidi dabida."
+                };
 
-                LoadAnimations(); // Ladda om mappar för det nya skinnet
+                LoadAnimations();
                 ShowSlimeReaction("IDLE", greeting);
-                CheckStatus(null, null);
+                RunStatusCheck();
 
                 var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
                 timer.Tick += (s, args) =>
@@ -479,7 +465,7 @@ namespace SlimeHelper
             try
             {
                 var settings = new SlimeSettings { CurrentSkin = currentSkin };
-                string json = JsonSerializer.Serialize(settings);
+                string json = JsonSerializer.Serialize(settings, JsonOptions);
                 File.WriteAllText(settingsPath, json);
             }
             catch { }
@@ -505,6 +491,11 @@ namespace SlimeHelper
 
         private void OnViewNotesClick(object sender, RoutedEventArgs e)
         {
+            TriggerOpenNotes();
+        }
+
+        private void TriggerOpenNotes()
+        {
             try
             {
                 string commandFile = Path.Combine(Path.GetTempPath(), "slime_command.txt");
@@ -518,7 +509,7 @@ namespace SlimeHelper
                 timer.Tick += (s, args) =>
                 {
                     SpeechBubble.Visibility = Visibility.Collapsed;
-                    CheckStatus(null, null);
+                    RunStatusCheck();
                     timer.Stop();
                 };
                 timer.Start();
@@ -545,7 +536,7 @@ namespace SlimeHelper
         {
             var settings = LoadFullSettings();
             settings.GeminiKey = newKey;
-            string json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
+            string json = JsonSerializer.Serialize(settings, JsonOptions);
             File.WriteAllText(settingsPath, json);
 
             SpeechText.Text = "Gemini key saved to my settings! ✨";
@@ -573,7 +564,7 @@ namespace SlimeHelper
 
                 if (string.IsNullOrWhiteSpace(apiKey) || apiKey == "Enter your Key here!")
                 {
-                    throw new Exception($"Missing API Key for {settings.SelectedProvider}. Check settings!");
+                    throw new InvalidOperationException($"Missing API Key for {settings.SelectedProvider}. Check settings!");
                 }
 
                 string context = ContextManager.BuildFullContext(settings, prompt, lastStatus);
@@ -601,7 +592,7 @@ namespace SlimeHelper
             {
                 isInteracting = false;
                 SpeechBubble.Visibility = Visibility.Collapsed;
-                CheckStatus(null, null);
+                RunStatusCheck();
                 timer.Stop();
             };
             timer.Start();
@@ -609,7 +600,7 @@ namespace SlimeHelper
 
         public static IAiProvider GetAiProvider(string providerName)
         {
-            return providerName.ToLower() switch
+            return providerName.ToLowerInvariant() switch
             {
                 "claude" => new ClaudeProvider(),
                 _ => new GeminiProvider()
@@ -620,10 +611,10 @@ namespace SlimeHelper
         {
             if (sender is MenuItem item)
             {
-                string selectedProvider = item.Tag.ToString() ?? "Gemini";
+                string selectedProvider = item.Tag?.ToString() ?? "Gemini";
                 var config = LoadFullSettings();
                 config.SelectedProvider = selectedProvider;
-                string json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
+                string json = JsonSerializer.Serialize(config, JsonOptions);
                 File.WriteAllText(settingsPath, json);
 
                 GeminiCheck.IsChecked = (selectedProvider == "Gemini");
@@ -637,15 +628,19 @@ namespace SlimeHelper
 
         private void OnSetClaudeKeyClick(object sender, RoutedEventArgs e)
         {
-            string key = Microsoft.VisualBasic.Interaction.InputBox("Enter your Claude API Key:", "Claude AI", "");
-            if (!string.IsNullOrEmpty(key)) SaveClaudeKey(key);
+            var currentSettings = LoadFullSettings();
+            string key = SlimeInputDialog.Show("Slime Brain Configuration", "Enter your Claude API Key:", currentSettings.ClaudeKey);
+            if (!string.IsNullOrEmpty(key) && key != "Enter your Key here!")
+            {
+                SaveClaudeKey(key);
+            }
         }
 
         private void SaveClaudeKey(string key)
         {
             var config = LoadFullSettings();
             config.ClaudeKey = key;
-            string json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
+            string json = JsonSerializer.Serialize(config, JsonOptions);
             File.WriteAllText(settingsPath, json);
 
             SpeechText.Text = "Claude is ready to think!";
@@ -686,10 +681,8 @@ namespace SlimeHelper
                     SpeechBubble.Visibility = Visibility.Visible;
                 }
 
-                // Ignorera inte ifall det är ERROR (vi vill alltid se fel)
                 if (isInteracting && status != "ERROR") return;
 
-                // Triggar den asynkrona loopen
                 _ = PlayAnimationLoop(status);
             });
         }
@@ -724,7 +717,7 @@ namespace SlimeHelper
         {
             try
             {
-                string json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
+                string json = JsonSerializer.Serialize(settings, JsonOptions);
                 File.WriteAllText(settingsPath, json);
             }
             catch (Exception ex)
@@ -772,10 +765,10 @@ namespace SlimeHelper
                         {
                             string prompt = promptProp.GetString() ?? "";
 
-                            if (prompt.StartsWith("SET_SKIN:"))
+                            if (prompt.StartsWith("SET_SKIN:", StringComparison.OrdinalIgnoreCase))
                             {
-                                string newSkin = prompt.Replace("SET_SKIN:", "").Trim();
-                                if (newSkin.Length > 0) newSkin = char.ToUpper(newSkin[0]) + newSkin.Substring(1).ToLower();
+                                string newSkin = prompt[9..].Trim();
+                                if (newSkin.Length > 0) newSkin = string.Concat(char.ToUpperInvariant(newSkin[0]), newSkin.AsSpan(1).ToString().ToLowerInvariant());
 
                                 Dispatcher.Invoke(() =>
                                 {
@@ -825,7 +818,7 @@ namespace SlimeHelper
 
     public class AnimationProfile
     {
-        public List<string> Frames { get; set; } = new();
+        public List<string> Frames { get; set; } = [];
         public int FrameDelayMs { get; set; } = 150;
         public int LoopDelayMs { get; set; } = 0;
     }
