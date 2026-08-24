@@ -1,1 +1,0 @@
-**© 2026 Mikael Renberg / Moth-Coder. All Rights Reserved.**
