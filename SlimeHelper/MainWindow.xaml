@@ -97,11 +97,14 @@
             </MenuItem>
 
             <Separator/>
-            <MenuItem Header="Install CLI to PATH" Click="InstallCliToPath_Click">
+            <MenuItem x:Name="CliMenuItem" Header="Install CLI to PATH" Click="InstallCliToPath_Click">
                 <MenuItem.Icon>
                     <TextBlock Text="💻"/>
                 </MenuItem.Icon>
             </MenuItem>
+
+            <Separator/>
+            <MenuItem x:Name="SleepMenuItem" Header="Put to Sleep" Click="SleepMenuItem_Click"/>
             <Separator/>
 
             <MenuItem Header="Shut down Slime" Click="CloseApp">
@@ -138,7 +141,8 @@
             <ScrollViewer 
         VerticalScrollBarVisibility="Auto" 
         MaxHeight="150"
-        HorizontalScrollBarVisibility="Disabled">
+        HorizontalScrollBarVisibility="Disabled"
+                Padding="0,0,5,0">
 
                 <TextBlock
             x:Name="SpeechText"

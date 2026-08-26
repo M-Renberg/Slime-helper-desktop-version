@@ -133,6 +133,24 @@
             "Ctrl+Z is the greatest invention in human history."
         };
 
+        public static readonly string[] UncommittedResponses = new[]
+        {
+            "Psst! You have uncommitted changes just sitting there...",
+            "Are we ever going to commit this code, or should it stay in limbo?",
+            "Lots of modified files! Time for a commit?",
+            "Don't let your changes pile up too much, commit them!",
+            "Hey, check your git status. Uncommitted changes detected!"
+        };
+
+        public static readonly string[] UnpushedResponses = new[]
+        {
+            "You have commits that aren't pushed yet! Share them with the world!",
+            "Local commits waiting to be pushed... Don't keep them to yourself!",
+            "Time to run git push! Let's sync up.",
+            "Your code is safe locally, but how about a push?",
+            "Psst, you're ahead of origin! Push those commits!"
+        };
+
         public static readonly Dictionary<string, (string Error, string Semicolon, string Warning, string Idle)> SkinPhrases = new()
         {
             {

@@ -15,6 +15,10 @@ namespace SlimeHelper
 
         private readonly string statusFilePath;
         private readonly DispatcherTimer checkTimer;
+
+        // Den globala timern som ser till att pratbubblor aldrig krockar!
+        private DispatcherTimer? _interactionTimer;
+
         private bool isInteracting;
         private readonly Random rng = new();
         private string lastStatus = "";
@@ -26,18 +30,22 @@ namespace SlimeHelper
 
         private readonly ActivityWatcher _activityWatcher = new();
         private readonly CodeWatcherService _codeWatcher = new();
+        private readonly GlobalWordWatcher _wordWatcher = new();
         private FileSystemWatcher? _cliCommandWatcher;
 
         // Animation State Machine variabler
         private CancellationTokenSource? _animationCts;
         private readonly Dictionary<string, AnimationProfile> _animationProfiles = [];
         private string _currentPlayingState = "";
+        private DateTime _lastRandomChatter = DateTime.MinValue;
+        private bool _isAsleep = false;
 
         public MainWindow()
         {
             InitializeComponent();
             LoadSettings();
             LoadAnimations();
+            UpdateCliMenuItem();
             var settings = LoadFullSettings();
 
             statusFilePath = Path.Combine(Path.GetTempPath(), "slime_status.txt");
@@ -49,8 +57,10 @@ namespace SlimeHelper
             checkTimer.Tick += CheckStatus;
             checkTimer.Start();
 
-            _activityWatcher.OnReaction += (status, msg) => ShowSlimeReaction(status, msg);
-            _codeWatcher.OnReaction += (status, msg) => ShowSlimeReaction(status, msg);
+            _activityWatcher.OnReaction += (status, msg) => HandleWatcherReaction(status, msg);
+            _codeWatcher.OnReaction += (status, msg) => HandleWatcherReaction(status, msg);
+            _wordWatcher.RegisterInstance();
+            _wordWatcher.OnReaction += (status, msg) => HandleWatcherReaction(status, msg);
 
             if (!string.IsNullOrEmpty(settings.ReposRootPath))
             {
@@ -87,6 +97,66 @@ namespace SlimeHelper
             SetupCommandWatcher();
             ShowSlimeReaction("IDLE", "");
             RunStatusCheck();
+
+            Closed += (s, e) =>
+            {
+                _wordWatcher.Dispose();
+                _activityWatcher.Dispose();
+                _codeWatcher.Dispose();
+            };
+        }
+
+        // --- SMARTA TIMERS FÖR MEDDELANDEN ---
+        private void StartInteractionTimer(int seconds)
+        {
+            _interactionTimer?.Stop();
+
+            _interactionTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(seconds) };
+            _interactionTimer.Tick += (s, e) =>
+            {
+                isInteracting = false;
+                SpeechBubble.Visibility = Visibility.Collapsed;
+                ShowSlimeReaction("IDLE", "");
+                RunStatusCheck();
+                _interactionTimer?.Stop();
+            };
+            _interactionTimer.Start();
+        }
+
+        private void ShowTempMessage(string text, string emotion, int seconds = 3)
+        {
+            isInteracting = true;
+            SpeechText.Text = text;
+            SpeechText.Foreground = Brushes.Black;
+            SpeechBubble.Visibility = Visibility.Visible;
+            ShowSlimeReaction(emotion, "");
+
+            StartInteractionTimer(seconds);
+        }
+
+        private void HandleWatcherReaction(string status, string msg)
+        {
+            if (_isAsleep) return;
+
+            Dispatcher.Invoke(() =>
+            {
+                // Spärr för slumpmässigt IDLE-prat
+                if (status == "IDLE" && !string.IsNullOrEmpty(msg))
+                {
+                    if ((DateTime.Now - _lastRandomChatter).TotalMinutes < 10) return;
+                    _lastRandomChatter = DateTime.Now;
+                }
+
+                if (!string.IsNullOrEmpty(msg))
+                {
+                    int displayTime = Math.Max(4, msg.Length / 20);
+                    ShowTempMessage(msg, status, displayTime);
+                }
+                else
+                {
+                    ShowSlimeReaction(status, "");
+                }
+            });
         }
 
         // --- SLIME ANIMATIONS LOGIC ---
@@ -109,13 +179,14 @@ namespace SlimeHelper
 
                 if (stateName == "IDLE")
                 {
-                    profile.FrameDelayMs = 200;
-                    profile.LoopDelayMs = 3000;
+                    profile.FrameDelayMs = 200; // Perfekt andningsrytm
+                    profile.LoopDelayMs = 1500;
 
                     if (files.Count >= 3)
                     {
                         var pingPong = new List<string>(files);
-                        for (int i = files.Count - 2; i > 0; i--)
+                        // Fixat till >= 0 så den garanterat slutar på rätt bildruta för en full cykel
+                        for (int i = files.Count - 2; i >= 0; i--)
                         {
                             pingPong.Add(files[i]);
                         }
@@ -144,16 +215,7 @@ namespace SlimeHelper
             if (!_animationProfiles.ContainsKey(stateKey))
             {
                 if (_animationProfiles.ContainsKey("IDLE")) stateKey = "IDLE";
-                else
-                {
-                    // Fallback om inga mappar hittas alls
-                    Dispatcher.Invoke(() =>
-                    {
-                        string fallback = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Images", "slime_idle.png");
-                        if (File.Exists(fallback)) UpdateImage(fallback, false);
-                    });
-                    return;
-                }
+                else return;
             }
 
             if (_currentPlayingState == stateKey && _animationCts != null && !_animationCts.IsCancellationRequested)
@@ -170,18 +232,22 @@ namespace SlimeHelper
             var profile = _animationProfiles[stateKey];
             if (profile.Frames.Count == 0) return;
 
-            bool isFirstFrame = true;
+            // Bara fade på allra första bilden vid en ny status
+            Dispatcher.Invoke(() => UpdateImage(profile.Frames[0], useFade: true));
 
             try
             {
+                // Väntar in fadeIn (100) + fadeOut (100) innan loopen fortsätter
+                await Task.Delay(220, token);
+
                 while (!token.IsCancellationRequested)
                 {
                     foreach (var framePath in profile.Frames)
                     {
                         token.ThrowIfCancellationRequested();
 
-                        Dispatcher.Invoke(() => UpdateImage(framePath, isFirstFrame));
-                        isFirstFrame = false;
+                        // Alla rutor inuti andningen/loopen byts direkt utan fade
+                        Dispatcher.Invoke(() => UpdateImage(framePath, useFade: false));
 
                         await Task.Delay(profile.FrameDelayMs, token);
                     }
@@ -217,24 +283,20 @@ namespace SlimeHelper
         {
             if (!File.Exists(imagePath)) return;
 
-            if (SlimeImage.Source is BitmapImage currentBitmap &&
-                currentBitmap.UriSource.AbsolutePath.Equals(new Uri(imagePath).AbsolutePath, StringComparison.OrdinalIgnoreCase))
-            {
-                return;
-            }
-
             var bitmap = new BitmapImage();
             bitmap.BeginInit();
             bitmap.UriSource = new Uri(imagePath, UriKind.Absolute);
             bitmap.CacheOption = BitmapCacheOption.OnLoad;
             bitmap.EndInit();
+            bitmap.Freeze();
 
             if (useFade)
             {
+                // Mjukare fade till 0.2
                 var fadeOut = new DoubleAnimation
                 {
-                    To = 0.0,
-                    Duration = TimeSpan.FromMilliseconds(150)
+                    To = 0.2,
+                    Duration = TimeSpan.FromMilliseconds(100)
                 };
 
                 fadeOut.Completed += (s, e) =>
@@ -242,9 +304,9 @@ namespace SlimeHelper
                     SlimeImage.Source = bitmap;
                     var fadeIn = new DoubleAnimation
                     {
-                        From = 0.0,
+                        From = 0.2,
                         To = 0.6,
-                        Duration = TimeSpan.FromMilliseconds(150)
+                        Duration = TimeSpan.FromMilliseconds(100)
                     };
                     SlimeImage.BeginAnimation(OpacityProperty, fadeIn);
                 };
@@ -253,6 +315,7 @@ namespace SlimeHelper
             }
             else
             {
+                // Direktbyte utan animering för andningsrutorna
                 SlimeImage.BeginAnimation(OpacityProperty, null);
                 SlimeImage.Opacity = 0.6;
                 SlimeImage.Source = bitmap;
@@ -268,6 +331,9 @@ namespace SlimeHelper
 
         private void CloseApp(object sender, RoutedEventArgs e)
         {
+            _wordWatcher.Dispose();
+            _activityWatcher.Dispose();
+            _codeWatcher.Dispose();
             Application.Current.Shutdown();
         }
 
@@ -289,7 +355,6 @@ namespace SlimeHelper
         private void PokeSlime()
         {
             if (isInteracting) return;
-            isInteracting = true;
 
             PlaySounds("Poke.wav");
 
@@ -322,21 +387,7 @@ namespace SlimeHelper
             };
 
             int index = rng.Next(pokePhrase.Length);
-            SpeechText.Text = pokePhrase[index];
-            SpeechText.Foreground = Brushes.Black;
-            SpeechBubble.Visibility = Visibility.Visible;
-
-            ShowSlimeReaction("POKE", "");
-
-            var resetTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-            resetTimer.Tick += (s, args) =>
-            {
-                isInteracting = false;
-                SpeechBubble.Visibility = Visibility.Collapsed;
-                RunStatusCheck();
-                resetTimer.Stop();
-            };
-            resetTimer.Start();
+            ShowTempMessage(pokePhrase[index], "POKE", 4);
         }
 
         private void CheckStatus(object? sender, EventArgs e)
@@ -470,16 +521,7 @@ namespace SlimeHelper
                 };
 
                 LoadAnimations();
-                ShowSlimeReaction("IDLE", greeting);
-                RunStatusCheck();
-
-                var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
-                timer.Tick += (s, args) =>
-                {
-                    SpeechBubble.Visibility = Visibility.Collapsed;
-                    timer.Stop();
-                };
-                timer.Start();
+                ShowTempMessage(greeting, "IDLE", 3);
             }
         }
 
@@ -517,30 +559,64 @@ namespace SlimeHelper
             TriggerOpenNotes();
         }
 
+        private void OpenCli_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string targetDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SlimeHelper", "bin");
+
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = "/k slime",
+                    UseShellExecute = true
+                };
+                System.Diagnostics.Process.Start(psi);
+
+                ShowTempMessage("Spawning CLI companion! 🚀", "FUNNY", 3);
+            }
+            catch (Exception)
+            {
+                ShowTempMessage("Could not open CLI terminal.", "ERROR", 3);
+            }
+        }
+
         private void TriggerOpenNotes()
         {
             try
             {
                 string commandFile = Path.Combine(Path.GetTempPath(), "slime_command.txt");
-                File.WriteAllText(commandFile, "OPEN_NOTES");
+                File.WriteAllText(commandFile, "");
 
-                SpeechText.Text = "Opening your notes";
-                SpeechText.Foreground = Brushes.Black;
-                SpeechBubble.Visibility = Visibility.Visible;
+                var settings = LoadFullSettings();
+                string targetPath = "";
 
-                var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-                timer.Tick += (s, args) =>
+                // Kolla om Obsidian-vault finns, annars öppna repos eller temp-mappen
+                if (!string.IsNullOrEmpty(settings.ObsidianVaultPath) && Directory.Exists(settings.ObsidianVaultPath))
                 {
-                    SpeechBubble.Visibility = Visibility.Collapsed;
-                    RunStatusCheck();
-                    timer.Stop();
-                };
-                timer.Start();
+                    targetPath = settings.ObsidianVaultPath;
+                }
+                else if (!string.IsNullOrEmpty(settings.ReposRootPath) && Directory.Exists(settings.ReposRootPath))
+                {
+                    targetPath = settings.ReposRootPath;
+                }
+                else
+                {
+                    targetPath = Path.GetTempPath();
+                }
+
+                // Öppna mappen i Utforskaren (eller Obsidian om det är ett vault)
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = targetPath,
+                    UseShellExecute = true
+                });
+
+                ShowTempMessage("Opening your notes/workspace!", "FUNNY", 3);
             }
-            catch
+            catch (Exception ex)
             {
-                SpeechText.Text = "Oops! Couldn't open notes.";
-                SpeechBubble.Visibility = Visibility.Visible;
+                ShowTempMessage($"Oops! Couldn't open notes: {ex.Message}", "ERROR", 3);
             }
         }
 
@@ -562,8 +638,7 @@ namespace SlimeHelper
             string json = JsonSerializer.Serialize(settings, JsonOptions);
             File.WriteAllText(settingsPath, json);
 
-            SpeechText.Text = "Gemini key saved to my settings! ✨";
-            SpeechBubble.Visibility = Visibility.Visible;
+            ShowTempMessage("Gemini key saved to my settings! ✨", "IDLE", 3);
             PlaySounds("Idle.wav");
         }
 
@@ -571,21 +646,34 @@ namespace SlimeHelper
         {
             try
             {
-                string sourceExe = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "slime.exe");
-                if (!File.Exists(sourceExe))
-                {
-                    ShowSlimeReaction("ERROR", "slime.exe was not found in the application directory.");
-                    return;
-                }
-
-                // 1. Skapa en lokal mapp för CLI-verktyget
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
                 string targetDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SlimeHelper", "bin");
                 Directory.CreateDirectory(targetDir);
 
-                string targetExe = Path.Combine(targetDir, "slime.exe");
-                File.Copy(sourceExe, targetExe, true);
+                // Vi måste kopiera alla nödvändiga filer för .NET, inte bara exe!
+                string[] filesToCopy = { "slime.exe", "SlimeCli.dll", "SlimeCli.runtimeconfig.json", "SlimeCli.deps.json" };
 
-                // 2. Hämta nuvarande User PATH och lägg till mappen om den saknas
+                bool exeFound = false;
+
+                foreach (var file in filesToCopy)
+                {
+                    string sourcePath = Path.Combine(baseDir, file);
+                    string targetPath = Path.Combine(targetDir, file);
+
+                    if (File.Exists(sourcePath))
+                    {
+                        File.Copy(sourcePath, targetPath, true);
+                        if (file == "slime.exe") exeFound = true;
+                    }
+                }
+
+                if (!exeFound)
+                {
+                    ShowTempMessage("ERROR, slime.exe was not found in the application directory.", "ERROR", 4);
+                    return;
+                }
+
+                // Hämta nuvarande User PATH och lägg till mappen om den saknas
                 string currentPath = Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.User) ?? "";
                 var paths = currentPath.Split(';', StringSplitOptions.RemoveEmptyEntries).ToList();
 
@@ -596,17 +684,38 @@ namespace SlimeHelper
                     Environment.SetEnvironmentVariable("Path", newPath, EnvironmentVariableTarget.User);
                 }
 
-                ShowSlimeReaction("FUNNY", "CLI installed! Restart your terminal and run 'slime help'.");
+                ShowTempMessage("CLI installed! Restart your terminal and run 'slime help'.", "FUNNY", 4);
             }
             catch (Exception ex)
             {
-                ShowSlimeReaction("ERROR", $"Failed to install CLI: {ex.Message}");
+                ShowTempMessage($"Failed to install CLI: {ex.Message}", "ERROR", 4);
+            }
+            UpdateCliMenuItem();
+        }
+
+        private void UpdateCliMenuItem()
+        {
+            string targetDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SlimeHelper", "bin");
+            string exePath = Path.Combine(targetDir, "slime.exe");
+
+            if (File.Exists(exePath))
+            {
+                CliMenuItem.Header = "Open Slime CLI";
+                CliMenuItem.Click -= InstallCliToPath_Click;
+                CliMenuItem.Click += OpenCli_Click;
+            }
+            else
+            {
+                CliMenuItem.Header = "Install CLI to PATH";
+                CliMenuItem.Click -= OpenCli_Click;
+                CliMenuItem.Click += InstallCliToPath_Click;
             }
         }
 
         private async void ProcessAiRequest(string prompt)
         {
             isInteracting = true;
+            _interactionTimer?.Stop(); // Stänger av gamla timers!
             string response = "";
 
             SpeechText.Text = "Hmm... let me think...";
@@ -634,6 +743,21 @@ namespace SlimeHelper
 
                 response = await AiService.AskSlime(fullQuery, provider, apiKey);
 
+                try
+                {
+                    string responseFile = Path.Combine(Path.GetTempPath(), "slime_response.json");
+                    File.WriteAllText(responseFile, JsonSerializer.Serialize(new { Response = response }));
+                }
+                catch { }
+
+                try
+                {
+                    string logPath = Path.Combine(Path.GetTempPath(), "slime_ai_log.txt");
+                    string logEntry = $"\n--- {DateTime.Now:yyyy-MM-dd HH:mm:ss} ---\nUSER: {prompt}\nSLIME: {response}\n";
+                    File.AppendAllText(logPath, logEntry);
+                }
+                catch { /* Ignorera om filen är låst tillfälligt */ }
+
                 SpeechText.Text = response;
                 ShowSlimeReaction("IDLE", "");
                 PlaySounds("Idle.wav");
@@ -646,16 +770,9 @@ namespace SlimeHelper
                 response = SpeechText.Text;
             }
 
-            int displayTime = Math.Max(4, response.Length / 50);
-            var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(displayTime) };
-            timer.Tick += (s, args) =>
-            {
-                isInteracting = false;
-                SpeechBubble.Visibility = Visibility.Collapsed;
-                RunStatusCheck();
-                timer.Stop();
-            };
-            timer.Start();
+            // Startar den nya timern för AI-svaret (minst 6 sek, eller 20 tecken/sek)
+            int displayTime = Math.Max(6, response.Length / 20);
+            StartInteractionTimer(displayTime);
         }
 
         public static IAiProvider GetAiProvider(string providerName)
@@ -680,9 +797,7 @@ namespace SlimeHelper
                 GeminiCheck.IsChecked = (selectedProvider == "Gemini");
                 ClaudeCheck.IsChecked = (selectedProvider == "Claude");
 
-                SpeechText.Text = $"Brain switched to {selectedProvider}!";
-                SpeechBubble.Visibility = Visibility.Visible;
-                ShowSlimeReaction("FUNNY", "");
+                ShowTempMessage($"Brain switched to {selectedProvider}!", "FUNNY", 3);
             }
         }
 
@@ -703,8 +818,7 @@ namespace SlimeHelper
             string json = JsonSerializer.Serialize(config, JsonOptions);
             File.WriteAllText(settingsPath, json);
 
-            SpeechText.Text = "Claude is ready to think!";
-            SpeechBubble.Visibility = Visibility.Visible;
+            ShowTempMessage("Claude is ready to think!", "IDLE", 3);
         }
 
         private void OnSetObsidianVaultClick(object sender, RoutedEventArgs e)
@@ -723,10 +837,7 @@ namespace SlimeHelper
                 currentSettings.ObsidianVaultPath = dialog.FolderName;
                 SaveFullSettings(currentSettings);
 
-                SpeechText.Text = "Obsidian Vault connected! 📓✨";
-                SpeechText.Foreground = Brushes.Black;
-                SpeechBubble.Visibility = Visibility.Visible;
-                ShowSlimeReaction("FUNNY", "");
+                ShowTempMessage("Obsidian Vault connected! 📓✨", "FUNNY", 3);
                 PlaySounds("Idle.wav");
             }
         }
@@ -740,8 +851,6 @@ namespace SlimeHelper
                     SpeechText.Text = message;
                     SpeechBubble.Visibility = Visibility.Visible;
                 }
-
-                if (isInteracting && status != "ERROR") return;
 
                 _ = PlayAnimationLoop(status);
             });
@@ -765,11 +874,24 @@ namespace SlimeHelper
 
                 _codeWatcher.Start(currentSettings.ReposRootPath);
 
-                SpeechText.Text = "Git Repositories folder linked! 📁🚀";
-                SpeechText.Foreground = Brushes.Black;
-                SpeechBubble.Visibility = Visibility.Visible;
-                ShowSlimeReaction("FUNNY", "");
+                ShowTempMessage("Git Repositories folder linked! 📁🚀", "FUNNY", 3);
                 PlaySounds("Idle.wav");
+            }
+        }
+
+        private void SleepMenuItem_Click(object sender, RoutedEventArgs e)
+        {
+            _isAsleep = !_isAsleep;
+
+            if (_isAsleep)
+            {
+                SleepMenuItem.Header = "Wake Up";
+                ShowSlimeReaction("SLEEP", "Zzz... Goodnight...");
+            }
+            else
+            {
+                SleepMenuItem.Header = "Put to Sleep";
+                ShowSlimeReaction("IDLE", "I'm awake again!");
             }
         }
 
@@ -837,7 +959,7 @@ namespace SlimeHelper
                                     settings.CurrentSkin = currentSkin;
                                     SaveFullSettings(settings);
                                     LoadAnimations();
-                                    ShowSlimeReaction("FUNNY", $"Changed skin to {currentSkin}!");
+                                    ShowTempMessage($"Changed skin to {currentSkin}!", "FUNNY", 3);
                                 });
                             }
                             else if (!string.IsNullOrEmpty(prompt))

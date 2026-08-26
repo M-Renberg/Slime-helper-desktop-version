@@ -1,105 +1,65 @@
-
-
 <div align="center">
-
-  <h3 align="center">Slime Helper</h3>
-
+  <h3 align="center">Slime Helper (Desktop Version)</h3>
   <p align="center">
-
-    A VSCode extention that helps you keep track of your work and files.
-
+An interactive desktop companion that lives on your screen, reacts to your code, monitors git activity, listens globally, and talks to AI (Gemini & Claude)!
     <br />
 
-    <a href="https://github.com/M-Renberg/Vsc-slime-helper"><strong>Explore the docs »</strong></a>
-
+    <a href="https://github.com/M-Renberg/Vsc-slime-helper-desktop-version"><strong>Explore the docs »</strong></a>
     <br />
-
-  
-
   </p>
-
 </div>
-
-  
-
 <details>
-
   <summary>Table of Contents</summary>
-
   <ol>
-
     <li>
-
       <a href="#about-the-project">About The Project</a>
-
     </li>
-
     <li>
-
       <a href="#getting-started">Getting Started</a>
-
       <ul>
-
         <li><a href="#prerequisites">Prerequisites</a></li>
-
         <li><a href="#installation">Installation</a></li>
-
       </ul>
-
     </li>
-
     <li><a href="#usage">Usage</a></li>
-
     <li><a href="#contributing">Contributing</a></li>
-
     <li><a href="#license">License</a></li>
-
     <li><a href="#contact">Contact</a></li>
-
   </ol>
-
 </details>
 
-  
-
 ---
-
-  
 
 ## 👾 About The Project <a name="about-the-project"></a>
-
   
-
-
-Why this project exists:
-
-* It saves time.
-
-* DRY: Don't Repeat Yourself.
-
-* It helps developers focus on code.
-
-  
+Slime Helper Desktop is a standalone WPF desktop application featuring an animated, squishy slime companion that keeps you company while you code. Unlike extension-based versions, this runs globally across your entire system, helping you stay focused, taking care of breaks, and chatting with AI directly from your desktop or via the built-in CLI companion.
 
 ---
 
-  
+Why this project exists:
+* **Companionship:** Makes coding sessions less lonely with animated states, breathing loops, and expressive skins.
+* **Universal Monitoring:** Listens to global keystrokes and file changes across any IDE or text editor.
+* **AI-Powered:** Integrates seamlessly with Gemini and Claude to answer questions and provide context about your workspace.
+
+---
+
+## Key Features <a name="features"></a>
+
+* **Global Word Watcher:** Listens for triggers globally (e.g., `console.log`, `todo`, `async`, `fixme`) regardless of what editor you are using.
+* **Git & File Tracking:** Monitors repository changes, warns about copy-paste spikes ("vibe coding"), and tracks new or deleted files.
+* **Custom Skins:** Switch between alternative looks (Default/Blue, Green, Pink, and Girl) with unique animations and phrases.
+* **AI Brain Integration:** Connects to Gemini or Claude with context-aware prompts based on your workspace.
+* **CLI Companion:** Install the built-in CLI tool (`slime`) directly to your PATH to interact with your slime straight from the terminal.
+* **Interactive Controls:** Right-click context menu for volume control, sleep mode, opening notes/Obsidian vaults, and switching AI providers.
 
 ## 🚀 Getting Started <a name="getting-started"></a>
-
-  
 
 Follow instructions to get the project working on your device.
 
 ### Prerequisites <a name="prerequisites"></a>
 
-  
-
-This is what you need to install the software.
-
-- Bash
-
-- IDE (VSCode and Visual Studios)
+* .NET SDK (compatible with the solution)
+* Visual Studio or another C# compatible IDE
 
 *installation:*
 
@@ -109,42 +69,31 @@ run vscode och run debug to try it out.
 
 export av vsix.
 
-  
-
 ### Installation <a name="installation"></a>
-
-  
 
 1. Clone the repo
 
    ```sh
 
-   git clone https://github.com/M-Renberg/Vsc-slime-helper
+1. git clone https://github.com/M-Renberg/Vsc-slime-helper-desktop-version
 
    ```
 
-  
-  
+2. Open the solution in Visual Studio.
 
-## 🔧 Usage <a name="usage"></a>
+3. Build and run the project to generate the executable.
 
-  
+## Usage <a name="usage"></a>
 
-Extention that helps you while coding.
+- Interact: Click or poke the slime to get random witty remarks or advice.
 
-- Keeping track on file.
-- Errors and Warnings
-- Breaks
-- and over all progress
-  
+- Menu: Right-click the slime window to open the context menu for settings, skins, volume sliders, and quick CLI access.
 
-## 🤝 Contributing <a name="contributing"></a>
+- CLI: Use the "Install CLI to PATH" option from the right-click menu to use slime directly in your terminal.
 
-  
+## Contributing <a name="contributing"></a>
 
 Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
-
-  
 
 1. Fork the Project
 
@@ -156,30 +105,17 @@ Contributions are what make the open source community such an amazing place to l
 
 5. Open a Pull Request
 
-  
-
 ---
 
-  
-
-## 📜 License <a name="license"></a>
-
-  
+## License <a name="license"></a>
 
 Distributed under the MIT License.
 
-  
-
 ---
-
-  
 
 ## 👤 Contact <a name="contact"></a>
 
-  
-
 Mikael Renberg - [LinkedIn](https://www.linkedin.com/in/mikael-renberg-98b062178/) - mikael.k.renberg@hotmail.com
 
-  
 
-Project Link: [Rastaurang](https://github.com/M-Renberg/Vsc-slime-helper)
+Project Link: [Github](https://github.com/M-Renberg/Vsc-slime-helper-desktop-version)
