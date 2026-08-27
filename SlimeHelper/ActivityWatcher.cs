@@ -21,6 +21,8 @@ namespace SlimeHelper
         private static LowLevelKeyboardProc? _proc;
         private static DateTime _lastKeyboardActivity = DateTime.Now;
 
+        private static bool _wasAsleep = false;
+
         public ActivityWatcher()
         {
             _proc = HookCallback;
@@ -50,6 +52,7 @@ namespace SlimeHelper
                 if (!_isCurrentlyAfk)
                 {
                     _isCurrentlyAfk = true;
+                    _wasAsleep = true;
                     _streakMinutes = 0;
                     OnReaction?.Invoke("SLEEP", "Zzz...");
                 }
@@ -77,10 +80,17 @@ namespace SlimeHelper
                 return;
             }
 
-            _streakMinutes++;
-            if (_streakMinutes >= 5 && _streakMinutes % 10 == 0)
+            if (inactiveMinutes < 2)
             {
-                OnReaction?.Invoke("STREAK", $"You're on fire! {_streakMinutes} min streak!");
+                _streakMinutes++;
+                if (_streakMinutes >= 5 && _streakMinutes % 10 == 0)
+                {
+                    OnReaction?.Invoke("STREAK", $"You're on fire! {_streakMinutes} min streak!");
+                }
+            }
+            else
+            {
+                _streakMinutes = 0; // Död direkt om man är inaktiv i 2 min
             }
         }
 
@@ -151,6 +161,11 @@ namespace SlimeHelper
             if (nCode >= 0)
             {
                 _lastKeyboardActivity = DateTime.Now;
+
+                if (_wasAsleep)
+                {
+                    _wasAsleep = false;
+                }
             }
             return CallNextHookEx(_hookID, nCode, wParam, lParam);
         }
