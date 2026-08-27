@@ -121,7 +121,7 @@ namespace SlimeHelper
             }
             else if (word.Contains("async") || word.Contains("await") || word.Contains("thread.sleep"))
             {
-                OnReaction?.Invoke("AFK", "Zzz... Yeah I'm waiting...");
+                OnReaction?.Invoke("SLEEP", "Zzz... Yeah I'm waiting...");
             }
             else if (word.Contains("coffee") || word.Contains("drink") || word.Contains("pizza") || word.Contains("snack"))
             {

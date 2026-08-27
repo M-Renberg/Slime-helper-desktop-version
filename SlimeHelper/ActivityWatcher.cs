@@ -51,7 +51,7 @@ namespace SlimeHelper
                 {
                     _isCurrentlyAfk = true;
                     _streakMinutes = 0;
-                    OnReaction?.Invoke("AFK", "Zzz...");
+                    OnReaction?.Invoke("SLEEP", "Zzz...");
                 }
                 return;
             }
