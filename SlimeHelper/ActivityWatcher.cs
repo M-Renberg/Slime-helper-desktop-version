@@ -11,7 +11,7 @@ namespace SlimeHelper
         private DateTime _workStartTime = DateTime.Now;
         private int _streakMinutes = 0;
         private bool _isCurrentlyAfk = false;
-        private int _gitCheckCounter = 0; // Håller koll på när vi ska köra git-koll
+        private int _gitCheckCounter = 0;
 
         public event Action<string, string>? OnReaction;
 
@@ -21,10 +21,14 @@ namespace SlimeHelper
         private static LowLevelKeyboardProc? _proc;
         private static DateTime _lastKeyboardActivity = DateTime.Now;
 
-        private static bool _wasAsleep = false;
+        // En instans-referens så att den statiska hooken kan nå händelsen
+        private static ActivityWatcher? _instance;
+
+        private readonly Random _rng = new();
 
         public ActivityWatcher()
         {
+            _instance = this;
             _proc = HookCallback;
             _hookID = SetHook(_proc);
 
@@ -37,7 +41,14 @@ namespace SlimeHelper
             {
                 if (!_isCurrentlyAfk)
                 {
-                    OnReaction?.Invoke("IDLE", SlimeResponses.PickRandom(SlimeResponses.IdleThoughts));
+                    string randomThought = SlimeResponses.PickRandom(SlimeResponses.IdleThoughts);
+
+                    // En array med roliga statusar/animationer hon kan växla mellan
+                    string[] randomReactions = { "IDLE", "CUTE", "THINKING", "HURRAY" };
+                    string selectedReaction = randomReactions[_rng.Next(randomReactions.Length)];
+
+                    // Skicka med den slumpade reaktionen istället för att alltid köra "IDLE"
+                    OnReaction?.Invoke(selectedReaction, randomThought);
                 }
             };
             _idleTalkTimer.Start();
@@ -47,25 +58,27 @@ namespace SlimeHelper
         {
             double inactiveMinutes = (DateTime.Now - _lastKeyboardActivity).TotalMinutes;
 
+            // Om vi är inaktiva i mer än 6 minuter -> gå in i SLEEP och stanna där!
             if (inactiveMinutes > 6)
             {
                 if (!_isCurrentlyAfk)
                 {
                     _isCurrentlyAfk = true;
-                    _wasAsleep = true;
                     _streakMinutes = 0;
                     OnReaction?.Invoke("SLEEP", "Zzz...");
                 }
+                // VIKTIGT: Returnera direkt här så att inga andra IDLE- eller streak-regler körs medan hon sover!
                 return;
             }
 
+            // Om hon var AFK/sover men vi fångar upp att inaktiviteten är borta
             if (_isCurrentlyAfk)
             {
                 _isCurrentlyAfk = false;
                 OnReaction?.Invoke("IDLE", "Oh, you're back!");
             }
 
-            // Git-koll var 5:e minut (30 sekunder * 10 = 5 minuter)
+            // Git-koll var 5:e minut
             _gitCheckCounter++;
             if (_gitCheckCounter >= 10)
             {
@@ -90,7 +103,7 @@ namespace SlimeHelper
             }
             else
             {
-                _streakMinutes = 0; // Död direkt om man är inaktiv i 2 min
+                _streakMinutes = 0;
             }
         }
 
@@ -98,7 +111,6 @@ namespace SlimeHelper
         {
             try
             {
-                // Kör git status för mappen där appen körs (eller anpassa sökvägen till ditt repo)
                 string repoPath = Directory.GetCurrentDirectory();
 
                 var psi = new ProcessStartInfo
@@ -117,7 +129,6 @@ namespace SlimeHelper
                     string output = process.StandardOutput.ReadToEnd();
                     process.WaitForExit();
 
-                    // Om output inte är tom har vi ocommittade ändringar
                     if (!string.IsNullOrWhiteSpace(output))
                     {
                         OnReaction?.Invoke("DIRTY", SlimeResponses.PickRandom(SlimeResponses.UncommittedResponses));
@@ -125,7 +136,6 @@ namespace SlimeHelper
                     }
                 }
 
-                // Kolla även om vi har opushade commits (ahead)
                 psi.Arguments = "log @{u}..HEAD --oneline";
                 using var pushProcess = Process.Start(psi);
                 if (pushProcess != null)
@@ -139,10 +149,7 @@ namespace SlimeHelper
                     }
                 }
             }
-            catch
-            {
-                // Ignorera om git inte finns tillgängligt i mappen
-            }
+            catch { }
         }
 
         private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -160,12 +167,14 @@ namespace SlimeHelper
         {
             if (nCode >= 0)
             {
-                _lastKeyboardActivity = DateTime.Now;
-
-                if (_wasAsleep)
+                // Om hon sov tidigare och vi nu trycker på en tangent -> väck henne direkt!
+                if (_instance != null && _instance._isCurrentlyAfk)
                 {
-                    _wasAsleep = false;
+                    _instance._isCurrentlyAfk = false;
+                    _instance.OnReaction?.Invoke("IDLE", "Oh, you're back!");
                 }
+
+                _lastKeyboardActivity = DateTime.Now;
             }
             return CallNextHookEx(_hookID, nCode, wParam, lParam);
         }
@@ -194,6 +203,7 @@ namespace SlimeHelper
                     _hookID = IntPtr.Zero;
                 }
 
+                _instance = null;
                 _disposed = true;
             }
         }

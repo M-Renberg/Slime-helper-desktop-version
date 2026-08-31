@@ -102,6 +102,9 @@
     <None Update="Images\Girl\BREAK\01.png">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
+    <None Update="Images\Girl\CUTE\Slime_cute.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
     <None Update="Images\Girl\DIRTY\01.png">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
@@ -127,6 +130,9 @@
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
     <None Update="Images\Girl\FUNNY\01.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Images\Girl\HURRAY\slime_hurray.png">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
     <None Update="Images\Girl\IDLE\01.png">
@@ -199,6 +205,9 @@
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
     <None Update="Images\Girl\STREAK\01.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Images\Girl\THINKING\slime_thinking.png">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
     <None Update="Images\Girl\TIRED\01.png">
