@@ -65,10 +65,13 @@ namespace SlimeHelper
             return null;
         }
 
-        public async Task<bool> AddEventAsync(string summary, DateTime? startTime = null)
+        public async Task<bool> AddEventAsync(string input)
         {
             try
             {
+                // 1. Tolka datum och tid ur strängen
+                (string summary, DateTime startTime) = ParseEventInput(input);
+
                 UserCredential credential;
                 string credPath = "credentials.json";
 
@@ -90,15 +93,14 @@ namespace SlimeHelper
                     ApplicationName = ApplicationName,
                 });
 
-                DateTime start = startTime ?? DateTime.Now.AddHours(1); // Standard: 1 timme fram i tiden om inget annat anges
-                DateTime end = start.AddHours(1); // Standard: 1 timmes möteslängd
+                DateTime end = startTime.AddHours(1); // Standard: 1 timmes möteslängd
 
                 var newEvent = new Event()
                 {
                     Summary = summary,
                     Start = new EventDateTime()
                     {
-                        DateTimeDateTimeOffset = start,
+                        DateTimeDateTimeOffset = startTime,
                     },
                     End = new EventDateTime()
                     {
@@ -116,6 +118,98 @@ namespace SlimeHelper
                 File.WriteAllText(Path.Combine(Path.GetTempPath(), "slime_cal_error.txt"), ex.ToString());
                 return false;
             }
+        }
+
+        private (string summary, DateTime startTime) ParseEventInput(string input)
+        {
+            DateTime targetDate = DateTime.Now.AddHours(1); // Standard: 1 timme fram om inget anges
+            string summary = input;
+
+            // 1. Leta efter klockslag (t.ex. "kl 14:30", "kl 14", "at 14:30", "14:30", "14.30")
+            var timeMatch = System.Text.RegularExpressions.Regex.Match(input, @"(?:kl\.?|klockan|at)?\s*(\d{1,2})[:\.](\d{2})|\b(\d{1,2})\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            if (timeMatch.Success)
+            {
+                int hours = 0;
+                int minutes = 0;
+
+                if (!string.IsNullOrEmpty(timeMatch.Groups[1].Value))
+                {
+                    hours = int.Parse(timeMatch.Groups[1].Value);
+                    minutes = int.Parse(timeMatch.Groups[2].Value);
+                }
+                else if (!string.IsNullOrEmpty(timeMatch.Groups[3].Value))
+                {
+                    hours = int.Parse(timeMatch.Groups[3].Value);
+                    if (input.Contains("kl") || input.Contains("klockan") || input.Contains("at") || (hours > 7 && hours < 23))
+                    {
+                        minutes = 0;
+                    }
+                }
+
+                if (hours >= 0 && hours < 24 && minutes >= 0 && minutes < 60)
+                {
+                    targetDate = new DateTime(targetDate.Year, targetDate.Month, targetDate.Day, hours, minutes, 0);
+                }
+
+                // Rensa bort klockslaget ur titeln/sammanfattningen
+                summary = timeMatch.Value.Length > 0 ? input.Replace(timeMatch.Value, "").Trim() : summary;
+            }
+
+            // 2. Leta efter relativa dagar eller veckodagar (Svenska & Engelska)
+            string lowerInput = input.ToLower();
+            if (lowerInput.Contains("imorgon") || lowerInput.Contains("tomorrow"))
+            {
+                targetDate = targetDate.AddDays(1);
+                summary = summary.Replace("imorgon", "", StringComparison.OrdinalIgnoreCase)
+                                 .Replace("tomorrow", "", StringComparison.OrdinalIgnoreCase);
+            }
+            else if (lowerInput.Contains("i övermorgon") || lowerInput.Contains("övermorgon") || lowerInput.Contains("day after tomorrow"))
+            {
+                targetDate = targetDate.AddDays(2);
+                summary = summary.Replace("i övermorgon", "", StringComparison.OrdinalIgnoreCase)
+                                 .Replace("övermorgon", "", StringComparison.OrdinalIgnoreCase)
+                                 .Replace("day after tomorrow", "", StringComparison.OrdinalIgnoreCase);
+            }
+            else
+            {
+                var daysMap = new Dictionary<string, DayOfWeek>
+        {
+            { "måndag", DayOfWeek.Monday }, { "monday", DayOfWeek.Monday },
+            { "tisdag", DayOfWeek.Tuesday }, { "tuesday", DayOfWeek.Tuesday },
+            { "onsdag", DayOfWeek.Wednesday }, { "wednesday", DayOfWeek.Wednesday },
+            { "torsdag", DayOfWeek.Thursday }, { "thursday", DayOfWeek.Thursday },
+            { "fredag", DayOfWeek.Friday }, { "friday", DayOfWeek.Friday },
+            { "lördag", DayOfWeek.Saturday }, { "saturday", DayOfWeek.Saturday },
+            { "söndag", DayOfWeek.Sunday }, { "sunday", DayOfWeek.Sunday }
+        };
+
+                foreach (var pair in daysMap)
+                {
+                    if (lowerInput.Contains(pair.Key))
+                    {
+                        int daysToAdd = ((int)pair.Value - (int)DateTime.Now.DayOfWeek + 7) % 7;
+                        if (daysToAdd == 0) daysToAdd = 7; // Nästa vecka om det är samma dag
+                        targetDate = DateTime.Now.Date.AddDays(daysToAdd).AddHours(targetDate.Hour).AddMinutes(targetDate.Minute);
+
+                        summary = System.Text.RegularExpressions.Regex.Replace(summary, pair.Key, "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                        break;
+                    }
+                }
+            }
+
+            // Städa upp extra ord (både svenska och engelska) från titeln
+            summary = summary.Replace(" på ", " ", StringComparison.OrdinalIgnoreCase)
+                             .Replace(" i ", " ", StringComparison.OrdinalIgnoreCase)
+                             .Replace(" kl ", " ", StringComparison.OrdinalIgnoreCase)
+                             .Replace(" klockan ", " ", StringComparison.OrdinalIgnoreCase)
+                             .Replace(" at ", " ", StringComparison.OrdinalIgnoreCase)
+                             .Replace(" on ", " ", StringComparison.OrdinalIgnoreCase)
+                             .Trim(' ', '"', '-');
+
+            if (string.IsNullOrWhiteSpace(summary)) summary = "Slime Meeting";
+
+            return (summary, targetDate);
         }
     }
 }
