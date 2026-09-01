@@ -807,7 +807,7 @@ namespace SlimeHelper
                 GeminiCheck.IsChecked = (selectedProvider == "Gemini");
                 ClaudeCheck.IsChecked = (selectedProvider == "Claude");
 
-                ShowTempMessage($"Brain switched to {selectedProvider}!", "FUNNY", 3);
+                ShowTempMessage($"Brain switched to {selectedProvider}!", "CUTE", 3);
             }
         }
 
@@ -828,7 +828,7 @@ namespace SlimeHelper
             string json = JsonSerializer.Serialize(config, JsonOptions);
             File.WriteAllText(settingsPath, json);
 
-            ShowTempMessage("Claude is ready to think!", "IDLE", 3);
+            ShowTempMessage("Claude is ready to think!", "HURRAY", 3);
         }
 
         private void OnSetObsidianVaultClick(object sender, RoutedEventArgs e)
@@ -847,7 +847,7 @@ namespace SlimeHelper
                 currentSettings.ObsidianVaultPath = dialog.FolderName;
                 SaveFullSettings(currentSettings);
 
-                ShowTempMessage("Obsidian Vault connected! 📓✨", "FUNNY", 3);
+                ShowTempMessage("Obsidian Vault connected!", "NOTES", 3);
                 PlaySounds("Idle.wav");
             }
         }
@@ -873,7 +873,6 @@ namespace SlimeHelper
                 string? nextEvent = await _calendarWatcher.GetNextEventAsync();
                 if (!string.IsNullOrEmpty(nextEvent))
                 {
-                    // Använd din nya NOTES-reaktion när hon visar upp kalenderhändelsen!
                     string message = $"Upcoming: {nextEvent}";
                     ShowTempMessage(message, "NOTES", 5);
                 }
@@ -902,10 +901,40 @@ namespace SlimeHelper
 
                 _codeWatcher.Start(currentSettings.ReposRootPath);
 
-                ShowTempMessage("Git Repositories folder linked! 📁🚀", "FUNNY", 3);
+                ShowTempMessage("Git Repositories folder linked!", "NOTES", 3);
                 PlaySounds("Idle.wav");
             }
         }
+
+        private void OnOpenBrowserClick(object sender, RoutedEventArgs e)
+        {
+            string url = SlimeInputDialog.Show("Open Browser", "Enter URL or search query:", "https://github.com");
+
+            if (!string.IsNullOrWhiteSpace(url))
+            {
+                if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                    !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    url = "https://" + url;
+                }
+
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = url,
+                        UseShellExecute = true
+                    });
+                    ShowTempMessage("Opening browser!", "CUTE", 3);
+                    PlaySounds("Idle.wav");
+                }
+                catch (Exception ex)
+                {
+                    ShowTempMessage($"Could not open browser: {ex.Message}", "ERROR", 5);
+                }
+            }
+        }
+
 
         private void SleepMenuItem_Click(object sender, RoutedEventArgs e)
         {
@@ -923,6 +952,8 @@ namespace SlimeHelper
             }
         }
 
+
+        //LOAD AND SAVE FUNCTIONS
         private void SaveFullSettings(SlimeSettings settings)
         {
             try
@@ -950,6 +981,8 @@ namespace SlimeHelper
             return new SlimeSettings();
         }
 
+
+        //CLI
         private void SetupCommandWatcher()
         {
             string commandFile = Path.Combine(Path.GetTempPath(), "slime_command.json");

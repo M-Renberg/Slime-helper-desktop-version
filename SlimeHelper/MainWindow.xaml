@@ -104,7 +104,12 @@
             </MenuItem>
 
             <Separator/>
-            <MenuItem x:Name="SleepMenuItem" Header="Put to Sleep" Click="SleepMenuItem_Click"/>
+            
+                <MenuItem Header="Open Browser" Click="OnOpenBrowserClick"/>
+            
+            <Separator/>
+            
+                <MenuItem x:Name="SleepMenuItem" Header="Put to Sleep" Click="SleepMenuItem_Click"/>
             <Separator/>
 
             <MenuItem Header="Shut down Slime" Click="CloseApp">
