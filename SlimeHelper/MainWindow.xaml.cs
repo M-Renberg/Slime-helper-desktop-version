@@ -39,6 +39,9 @@ namespace SlimeHelper
         private string _currentPlayingState = "";
         private DateTime _lastRandomChatter = DateTime.MinValue;
         private bool _isAsleep = false;
+        private readonly CalendarWatcher _calendarWatcher = new();
+        private DispatcherTimer? _calendarTimer;
+
 
         public MainWindow()
         {
@@ -61,6 +64,13 @@ namespace SlimeHelper
             _codeWatcher.OnReaction += (status, msg) => HandleWatcherReaction(status, msg);
             _wordWatcher.RegisterInstance();
             _wordWatcher.OnReaction += (status, msg) => HandleWatcherReaction(status, msg);
+
+            _calendarTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(15) };
+            _calendarTimer.Tick += async (s, e) => await CheckCalendarAsync();
+            _calendarTimer.Start();
+
+            // Kör en koll direkt vid start
+            _ = CheckCalendarAsync();
 
             if (!string.IsNullOrEmpty(settings.ReposRootPath))
             {
@@ -856,6 +866,24 @@ namespace SlimeHelper
             });
         }
 
+        private async Task CheckCalendarAsync()
+        {
+            try
+            {
+                string? nextEvent = await _calendarWatcher.GetNextEventAsync();
+                if (!string.IsNullOrEmpty(nextEvent))
+                {
+                    // Använd din nya NOTES-reaktion när hon visar upp kalenderhändelsen!
+                    string message = $"Upcoming: {nextEvent}";
+                    ShowTempMessage(message, "NOTES", 5);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Could not fetch calender: {ex.Message}");
+            }
+        }
+
         private void OnSetReposPathClick(object sender, RoutedEventArgs e)
         {
             var currentSettings = LoadFullSettings();
@@ -960,6 +988,28 @@ namespace SlimeHelper
                                     SaveFullSettings(settings);
                                     LoadAnimations();
                                     ShowTempMessage($"Changed skin to {currentSkin}!", "FUNNY", 3);
+                                });
+                            }
+                            else if (prompt.StartsWith("CAL_ADD:", StringComparison.OrdinalIgnoreCase))
+                            {
+                                string eventTitle = prompt[8..].Trim();
+
+                                _ = Task.Run(async () =>
+                                {
+                                    bool success = await _calendarWatcher.AddEventAsync(eventTitle);
+
+                                    Dispatcher.Invoke(() =>
+                                    {
+                                        if (success)
+                                        {
+                                            ShowTempMessage($"Added \"{eventTitle}\" to calendar!", "NOTES", 5);
+                                            PlaySounds("Idle.wav");
+                                        }
+                                        else
+                                        {
+                                            ShowTempMessage("Failed to add to calendar...", "ERROR", 5);
+                                        }
+                                    });
                                 });
                             }
                             else if (!string.IsNullOrEmpty(prompt))

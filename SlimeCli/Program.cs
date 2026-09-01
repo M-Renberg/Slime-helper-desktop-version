@@ -50,6 +50,11 @@ namespace SlimeCli
                     if (args.Length < 2) { PrintUsage("slime skin <color>"); return; }
                     await ForwardToDesktopAppAsync($"SET_SKIN:{args[1]}");
                     break;
+                case "cal":
+                    if (args.Length < 2) { PrintUsage("slime cal \"<event title>\""); return; }
+                    string eventDetails = string.Join(" ", args.Skip(1));
+                    await ForwardToDesktopAppAsync($"CAL_ADD:{eventDetails}");
+                    break;
                 default:
                     string fullQuery = string.Join(" ", args);
                     await ForwardToDesktopAppAsync(fullQuery);
@@ -78,6 +83,7 @@ namespace SlimeCli
             PrintCommand("slime gen \"<prompt>\"", "Generate a new source code file.");
             PrintCommand("slime edit <file> \"<task>\"", "Refactor or edit an existing file with an interactive diff.");
             PrintCommand("slime todo \"<task>\"", "Add a new To-Do item to slime_notes.md.");
+            PrintCommand("slime cal \"<titel>\" [tid]", "Add a new event to Google Calendar.");
             PrintCommand("slime commit", "Generate a commit message based on staged git changes.");
             PrintCommand("slime explain <file>", "Get a quick explanation of a code file.");
             PrintCommand("slime sql \"<task>\"", "Generate raw SQL code for a specific requirement.");
@@ -410,7 +416,6 @@ namespace SlimeCli
 
                 using var client = new HttpClient();
                 string url = $"[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=){key}";
-
                 var body = new { contents = new[] { new { parts = new[] { new { text = prompt } } } } };
                 var response = await client.PostAsync(url, new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
 

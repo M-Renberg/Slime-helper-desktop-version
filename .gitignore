@@ -18,3 +18,5 @@ out/
 
 .DS_Store
 Thumbs.db
+
+credentials.json
