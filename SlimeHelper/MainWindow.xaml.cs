@@ -42,6 +42,8 @@ namespace SlimeHelper
         private readonly CalendarWatcher _calendarWatcher = new();
         private DispatcherTimer? _calendarTimer;
 
+        //memoney
+        private readonly SlimeBrainManager _brainManager = new();
 
         public MainWindow()
         {
@@ -746,10 +748,38 @@ namespace SlimeHelper
                     throw new InvalidOperationException($"Missing API Key for {settings.SelectedProvider}. Check settings!");
                 }
 
-                string context = ContextManager.BuildFullContext(settings, prompt, lastStatus);
-                string fullQuery = string.IsNullOrWhiteSpace(context)
-                    ? prompt
-                    : $"[Current Workspace Context]\n{context}\n\n[User Prompt]\n{prompt}";
+                string standardContext = ContextManager.BuildFullContext(settings, prompt, lastStatus);
+                string tagContext = "";
+
+                // Leta efter #taggar i prompten och hämta de mappade sökvägarna
+                var boundPaths = _brainManager.GetBoundPathsFromPrompt(prompt);
+
+                foreach (var path in boundPaths)
+                {
+                    tagContext += $"\n[Bound Context for {new DirectoryInfo(path).Name}]\n";
+
+                    // 1. Hämta README.md om den finns (ger bra grundläggande förståelse för repot)
+                    string readmeFile = Directory.GetFiles(path, "README.md", SearchOption.TopDirectoryOnly).FirstOrDefault();
+                    if (readmeFile != null)
+                    {
+                        string readmeContent = File.ReadAllText(readmeFile);
+                        tagContext += $"--- README.md ---\n{(readmeContent.Length > 1000 ? readmeContent.Substring(0, 1000) + "..." : readmeContent)}\n";
+                    }
+
+                    // 2. Använd ObsidianService för att direkt söka efter relevanta filer/kod i den bundna mappen!
+                    var searchResults = ObsidianService.SearchVaultContent(path, prompt, 2);
+                    if (searchResults.Any())
+                    {
+                        tagContext += "--- Relevant Files Found ---\n" + string.Join("\n", searchResults) + "\n";
+                    }
+                }
+
+                // Slå ihop all kontext med användarens prompt
+                string fullQuery = prompt;
+                if (!string.IsNullOrWhiteSpace(standardContext) || !string.IsNullOrWhiteSpace(tagContext))
+                {
+                    fullQuery = $"[Context]\n{standardContext}\n{tagContext}\n\n[User Prompt]\n{prompt}";
+                }
 
                 response = await AiService.AskSlime(fullQuery, provider, apiKey);
 
@@ -935,6 +965,102 @@ namespace SlimeHelper
             }
         }
 
+        //Notebook:
+
+        private async Task HandleAnalyzeDatasetCommand(string csvPath)
+        {
+            try
+            {
+                if (!File.Exists(csvPath))
+                {
+                    ShowTempMessage("Dataset file not found!", "ERROR", 5);
+                    return;
+                }
+
+                var settings = LoadFullSettings();
+                IAiProvider provider = GetAiProvider(settings.SelectedProvider);
+                string apiKey = (settings.SelectedProvider == "Claude") ? settings.ClaudeKey : settings.GeminiKey;
+                if (string.IsNullOrWhiteSpace(apiKey) || apiKey == "Enter your Key here!")
+                {
+                    throw new InvalidOperationException($"Missing API Key for {settings.SelectedProvider}. Check settings!");
+                }
+
+                // 1. Läs in de första 15 raderna av CSV-filen
+                var csvLines = File.ReadLines(csvPath).Take(15).ToList();
+                string csvSample = string.Join(Environment.NewLine, csvLines);
+                string fileNameWithoutExt = Path.GetFileNameWithoutExtension(csvPath);
+                string fileName = Path.GetFileName(csvPath);
+
+                // 2. Bygg prompten säkert utan klammer-krockar
+                string prompt = "You are an expert Data Scientist. Analyze the following CSV columns and sample data for the file '" + fileName + "':\n" +
+                                "```csv\n" + csvSample + "\n```\n" +
+                                "Create a complete Exploratory Data Analysis (EDA) Jupyter Notebook in JSON format.\n" +
+                                "The response MUST be a valid JSON object matching this schema exactly, without extra markdown formatting around it (pure JSON only):\n" +
+                                "{\n" +
+                                "  \"cells\": [\n" +
+                                "    {\n" +
+                                "      \"cell_type\": \"markdown\",\n" +
+                                "      \"metadata\": {},\n" +
+                                "      \"source\": [\"# Title\\n\", \"Description...\"]\n" +
+                                "    },\n" +
+                                "    {\n" +
+                                "      \"cell_type\": \"code\",\n" +
+                                "      \"metadata\": {},\n" +
+                                "      \"source\": [\"import pandas as pd\\n\", \"df = pd.read_csv('...')\"],\n" +
+                                "      \"outputs\": []\n" +
+                                "    }\n" +
+                                "  ]\n" +
+                                "}\n" +
+                                "Include cells for:\n" +
+                                "1. Markdown with introduction.\n" +
+                                "2. Code to read the CSV and display df.head(), df.info(), and df.describe().\n" +
+                                "3. Code for basic visualizations using Seaborn/Matplotlib.\n" +
+                                "Return ONLY valid JSON.";
+
+                ShowTempMessage("Slime is analyzing dataset... 📊", "WORKING", 4);
+                PlaySounds("Idle.wav");
+
+                // 3. Anropa AI-tjänsten (byt ut _aiService mot ditt faktiska fältnamn om det skiljer sig)
+                string aiResponse = await AiService.AskSlime(prompt, provider, apiKey);
+                // Rensa bort eventuella kodblock
+                aiResponse = aiResponse.Trim();
+
+
+                if (aiResponse.StartsWith("```json")) aiResponse = aiResponse[7..];
+                if (aiResponse.StartsWith("```")) aiResponse = aiResponse[3..];
+                if (aiResponse.EndsWith("```")) aiResponse = aiResponse[..^3];
+                aiResponse = aiResponse.Trim();
+
+                // 4. Deserialisera till NotebookRoot
+                var notebook = System.Text.Json.JsonSerializer.Deserialize<NotebookRoot>(aiResponse);
+                if (notebook == null || notebook.Cells.Count == 0)
+                {
+                    throw new Exception("Could not parse AI response into a valid notebook.");
+                }
+
+                // 5. Hitta var filen ska sparas
+                string targetDirectory = Path.GetDirectoryName(csvPath) ?? Directory.GetCurrentDirectory();
+
+                string notebooksDir = Path.Combine(targetDirectory, "notebooks");
+                Directory.CreateDirectory(notebooksDir);
+
+                string outputPath = Path.Combine(notebooksDir, $"{fileNameWithoutExt}_analysis.ipynb");
+
+                // 6. Spara ner .ipynb-filen
+                string jsonOutput = System.Text.Json.JsonSerializer.Serialize(notebook, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                await File.WriteAllTextAsync(outputPath, jsonOutput);
+
+                ShowTempMessage("Notebook created!", "NOTES", 4);
+                PlaySounds("Idle.wav");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error analyzing dataset: {ex.Message}");
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "slime_analyze_error.txt"), ex.ToString());
+                ShowTempMessage($"Failed to analyze: {ex.Message}", "ERROR", 6);
+            }
+        }
+
 
         private void SleepMenuItem_Click(object sender, RoutedEventArgs e)
         {
@@ -1045,10 +1171,34 @@ namespace SlimeHelper
                                     });
                                 });
                             }
+                            else if (prompt.StartsWith("ANALYZE_DATASET:", StringComparison.OrdinalIgnoreCase))
+                            {
+                                string csvPath = prompt[16..].Trim();
+                                _ = Task.Run(() => HandleAnalyzeDatasetCommand(csvPath));
+                            }
+
+                            else if (prompt.StartsWith("BIND_REPO:", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var parts = prompt[10..].Split('|');
+                                if (parts.Length == 2)
+                                {
+                                    string tag = parts[0];
+                                    string path = parts[1];
+
+                                    Dispatcher.Invoke(() =>
+                                    {
+                                        _brainManager.BindRepo(tag, path);
+                                        ShowTempMessage($"Bound {tag} to this folder! 🧠", "CUTE", 4);
+                                        PlaySounds("Idle.wav");
+                                    });
+                                }
+                            }
+
                             else if (!string.IsNullOrEmpty(prompt))
                             {
                                 Dispatcher.Invoke(() => ProcessAiRequest(prompt));
                             }
+
                         }
                         File.WriteAllText(commandFile, "");
                     }

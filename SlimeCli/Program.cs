@@ -55,6 +55,17 @@ namespace SlimeCli
                     string eventDetails = string.Join(" ", args.Skip(1));
                     await ForwardToDesktopAppAsync($"CAL_ADD:{eventDetails}");
                     break;
+                case "analyze":
+                    if (args.Length < 2) { PrintUsage("slime analyze <path-to-dataset.csv>"); return; }
+                    await ForwardToDesktopAppAsync($"ANALYZE_DATASET:{args[1]}");
+                    break;
+                case "bind":
+                    if (args.Length < 2) { PrintUsage("slime bind <#tag>"); return; }
+                    string tag = args[1];
+                    if (!tag.StartsWith("#")) tag = "#" + tag; // Säkerställ att det alltid är en hashtag
+                    string currentDir = Directory.GetCurrentDirectory();
+                    await ForwardToDesktopAppAsync($"BIND_REPO:{tag}|{currentDir}");
+                    break;
                 default:
                     string fullQuery = string.Join(" ", args);
                     await ForwardToDesktopAppAsync(fullQuery);
@@ -88,6 +99,7 @@ namespace SlimeCli
             PrintCommand("slime explain <file>", "Get a quick explanation of a code file.");
             PrintCommand("slime sql \"<task>\"", "Generate raw SQL code for a specific requirement.");
             PrintCommand("slime skin <color>", "Change the Slime skin (e.g. Pink, Green, Default).");
+            PrintCommand("slime analyze <file>", "Analyze a CSV dataset and generate a Jupyter Notebook.");
             PrintCommand("slime help", "Display this overview.");
             Console.WriteLine();
         }
