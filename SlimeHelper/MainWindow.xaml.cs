@@ -727,20 +727,18 @@ namespace SlimeHelper
         private async void ProcessAiRequest(string prompt)
         {
             isInteracting = true;
-            _interactionTimer?.Stop(); // Stänger av gamla timers!
+            _interactionTimer?.Stop();
             string response = "";
 
             SpeechText.Text = "Hmm... let me think...";
             SpeechText.Foreground = Brushes.Black;
             SpeechBubble.Visibility = Visibility.Visible;
-
             ShowSlimeReaction("FUNNY", "");
 
             try
             {
                 var settings = LoadFullSettings();
                 IAiProvider provider = GetAiProvider(settings.SelectedProvider);
-
                 string apiKey = (settings.SelectedProvider == "Claude") ? settings.ClaudeKey : settings.GeminiKey;
 
                 if (string.IsNullOrWhiteSpace(apiKey) || apiKey == "Enter your Key here!")
@@ -748,25 +746,26 @@ namespace SlimeHelper
                     throw new InvalidOperationException($"Missing API Key for {settings.SelectedProvider}. Check settings!");
                 }
 
+                // 1. Vilken konversationstråd är vi i? (Letar efter första #taggen, annars "General")
+                string activeThread = "General";
+                var words = prompt.Split(new[] { ' ', '\n', '\r', ',', '.', '?', '!' }, StringSplitOptions.RemoveEmptyEntries);
+                var firstTag = words.FirstOrDefault(w => w.StartsWith("#"));
+                if (firstTag != null) activeThread = firstTag.ToLowerInvariant();
+
+                // 2. Bygg kontext (Obsidian & Workspace)
                 string standardContext = ContextManager.BuildFullContext(settings, prompt, lastStatus);
                 string tagContext = "";
-
-                // Leta efter #taggar i prompten och hämta de mappade sökvägarna
                 var boundPaths = _brainManager.GetBoundPathsFromPrompt(prompt);
 
                 foreach (var path in boundPaths)
                 {
                     tagContext += $"\n[Bound Context for {new DirectoryInfo(path).Name}]\n";
-
-                    // 1. Hämta README.md om den finns (ger bra grundläggande förståelse för repot)
                     string readmeFile = Directory.GetFiles(path, "README.md", SearchOption.TopDirectoryOnly).FirstOrDefault();
                     if (readmeFile != null)
                     {
                         string readmeContent = File.ReadAllText(readmeFile);
                         tagContext += $"--- README.md ---\n{(readmeContent.Length > 1000 ? readmeContent.Substring(0, 1000) + "..." : readmeContent)}\n";
                     }
-
-                    // 2. Använd ObsidianService för att direkt söka efter relevanta filer/kod i den bundna mappen!
                     var searchResults = ObsidianService.SearchVaultContent(path, prompt, 2);
                     if (searchResults.Any())
                     {
@@ -774,29 +773,46 @@ namespace SlimeHelper
                     }
                 }
 
-                // Slå ihop all kontext med användarens prompt
-                string fullQuery = prompt;
+                // 3. Hämta de senaste meddelandena för denna specifika tråd
+                string historyContext = _brainManager.GetHistoryContext(activeThread, 6);
+
+                // 4. Sy ihop hela prompten snyggt!
+                var queryBuilder = new System.Text.StringBuilder();
+
                 if (!string.IsNullOrWhiteSpace(standardContext) || !string.IsNullOrWhiteSpace(tagContext))
                 {
-                    fullQuery = $"[Context]\n{standardContext}\n{tagContext}\n\n[User Prompt]\n{prompt}";
+                    queryBuilder.AppendLine("[System Context]");
+                    if (!string.IsNullOrWhiteSpace(standardContext)) queryBuilder.AppendLine(standardContext);
+                    if (!string.IsNullOrWhiteSpace(tagContext)) queryBuilder.AppendLine(tagContext);
                 }
 
+                if (!string.IsNullOrWhiteSpace(historyContext))
+                {
+                    queryBuilder.AppendLine($"\n[Conversation History ({activeThread})]");
+                    queryBuilder.AppendLine(historyContext);
+                }
+
+                queryBuilder.AppendLine("\n[User Prompt]");
+                queryBuilder.AppendLine(prompt);
+
+                string fullQuery = queryBuilder.ToString();
+
+                // 5. Skicka till AI
                 response = await AiService.AskSlime(fullQuery, provider, apiKey);
+
+                // 6. Spara samtalet till korttidsminnet
+                _brainManager.SaveMessage(activeThread, "User", prompt);
+                _brainManager.SaveMessage(activeThread, "Slime", response);
 
                 try
                 {
                     string responseFile = Path.Combine(Path.GetTempPath(), "slime_response.json");
                     File.WriteAllText(responseFile, JsonSerializer.Serialize(new { Response = response }));
+
+                    string logPath = Path.Combine(Path.GetTempPath(), "slime_ai_log.txt");
+                    File.AppendAllText(logPath, $"\n--- {DateTime.Now:yyyy-MM-dd HH:mm:ss} [{activeThread}] ---\nUSER: {prompt}\nSLIME: {response}\n");
                 }
                 catch { }
-
-                try
-                {
-                    string logPath = Path.Combine(Path.GetTempPath(), "slime_ai_log.txt");
-                    string logEntry = $"\n--- {DateTime.Now:yyyy-MM-dd HH:mm:ss} ---\nUSER: {prompt}\nSLIME: {response}\n";
-                    File.AppendAllText(logPath, logEntry);
-                }
-                catch { /* Ignorera om filen är låst tillfälligt */ }
 
                 SpeechText.Text = response;
                 ShowSlimeReaction("IDLE", "");
@@ -810,7 +826,6 @@ namespace SlimeHelper
                 response = SpeechText.Text;
             }
 
-            // Startar den nya timern för AI-svaret (minst 6 sek, eller 20 tecken/sek)
             int displayTime = Math.Max(6, response.Length / 20);
             StartInteractionTimer(displayTime);
         }
