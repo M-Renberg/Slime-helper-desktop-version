@@ -1,11 +1,15 @@
-﻿using System.IO;
+﻿using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+
 
 namespace SlimeHelper
 {
@@ -33,6 +37,8 @@ namespace SlimeHelper
         private readonly GlobalWordWatcher _wordWatcher = new();
         private FileSystemWatcher? _cliCommandWatcher;
 
+        private bool _isAfkSleeping = false;
+
         // Animation State Machine variabler
         private CancellationTokenSource? _animationCts;
         private readonly Dictionary<string, AnimationProfile> _animationProfiles = [];
@@ -42,14 +48,31 @@ namespace SlimeHelper
         private readonly CalendarWatcher _calendarWatcher = new();
         private DispatcherTimer? _calendarTimer;
 
+        //new
+        private DispatcherTimer? _motionTimer;
+        private readonly Stopwatch _motionClock = Stopwatch.StartNew();
+
+        private double _impactVelocity = 0;
+        private double _impactOffset = 0;
+
+        private DateTime _nextIdleFlavorAt = DateTime.Now.AddSeconds(15);
+        private double _flavorAngle = 0;
+        private double _flavorX = 0;
+
         //memoney
         private readonly SlimeBrainManager _brainManager = new();
 
         public MainWindow()
         {
             InitializeComponent();
+
+            DependencyPropertyDescriptor
+                .FromProperty(TextBlock.TextProperty, typeof(TextBlock))
+                .AddValueChanged(SpeechText, (s, e) => SpeechScroll.ScrollToTop());
+
             LoadSettings();
             LoadAnimations();
+            StartMotionLoop();
             UpdateCliMenuItem();
             var settings = LoadFullSettings();
 
@@ -135,6 +158,18 @@ namespace SlimeHelper
             _interactionTimer.Start();
         }
 
+        private void SpeechBubble_MouseEnter(object sender, MouseEventArgs e)
+        {
+            // Pausa auto-dölj medan man läser/scrollar (bara timer-styrda meddelanden)
+            if (isInteracting) _interactionTimer?.Stop();
+        }
+
+        private void SpeechBubble_MouseLeave(object sender, MouseEventArgs e)
+        {
+            if (isInteracting && !_isAfkSleeping && SpeechBubble.Visibility == Visibility.Visible)
+                StartInteractionTimer(3);
+        }
+
         private void ShowTempMessage(string text, string emotion, int seconds = 3)
         {
             isInteracting = true;
@@ -152,8 +187,27 @@ namespace SlimeHelper
 
             Dispatcher.Invoke(() =>
             {
-                // Spärr för slumpmässigt IDLE-prat
-                if (status == "IDLE" && !string.IsNullOrEmpty(msg))
+                // AFK-sömn: håll SLEEP tills användaren är tillbaka (ingen timer)
+                if (status == "SLEEP")
+                {
+                    _isAfkSleeping = true;
+                    _interactionTimer?.Stop();
+                    isInteracting = true; // blockerar statusfil-polling och idle-flavor medan hon sover
+                    ShowSlimeReaction("SLEEP", msg);
+                    HideBubbleAfterDelay(4);
+                    return;
+                }
+
+                // Första reaktionen efter AFK-sömn = väckning, ska alltid gå igenom
+                bool wakingUp = _isAfkSleeping;
+                if (wakingUp)
+                {
+                    _isAfkSleeping = false;
+                    isInteracting = false;
+                }
+
+                // Spärr för slumpmässigt IDLE-prat (gäller inte väckningen)
+                if (status == "IDLE" && !string.IsNullOrEmpty(msg) && !wakingUp)
                 {
                     if ((DateTime.Now - _lastRandomChatter).TotalMinutes < 10) return;
                     _lastRandomChatter = DateTime.Now;
@@ -169,6 +223,13 @@ namespace SlimeHelper
                     ShowSlimeReaction(status, "");
                 }
             });
+        }
+
+        // Dölj "Zzz..."-bubblan efter en stund, men behåll sömn-animationen
+        private async void HideBubbleAfterDelay(int seconds)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(seconds));
+            if (_isAfkSleeping) SpeechBubble.Visibility = Visibility.Collapsed;
         }
 
         // --- SLIME ANIMATIONS LOGIC ---
@@ -236,6 +297,8 @@ namespace SlimeHelper
             }
 
             _currentPlayingState = stateKey;
+
+            TriggerImpact(stateKey is "POKE" or "PUSH" or "HURRAY" or "WARNING" ? 1.6 : 1.0);
 
             _animationCts?.Cancel();
             _animationCts = new CancellationTokenSource();
@@ -430,6 +493,25 @@ namespace SlimeHelper
                             File.WriteAllText(commandFile, "");
                             string prompt = command[7..];
                             ProcessAiRequest(prompt);
+                            return;
+                        }
+                        else if (command.StartsWith("BIND_REPO:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            File.WriteAllText(commandFile, "");
+                            var parts = command[10..].Split('|');
+                            if (parts.Length == 2)
+                            {
+                                var (ok, msg) = _brainManager.BindRepo(parts[0], parts[1]);
+                                if (ok)
+                                {
+                                    ShowTempMessage($"Bound {msg} to this folder! 🧠", "CUTE", 4);
+                                    PlaySounds("Idle.wav");
+                                }
+                                else
+                                {
+                                    ShowTempMessage($"Bind failed: {msg}", "ERROR", 6);
+                                }
+                            }
                             return;
                         }
                     }
@@ -724,7 +806,22 @@ namespace SlimeHelper
             }
         }
 
-        private async void ProcessAiRequest(string prompt)
+        // Skickar svaret tillbaka till CLI:t (om kommandot kom därifrån)
+        private static void WriteCliResponse(string? requestId, string text, bool isError = false)
+        {
+            if (string.IsNullOrWhiteSpace(requestId)) return;
+            try
+            {
+                string finalPath = Path.Combine(Path.GetTempPath(), $"slime_response_{requestId}.json");
+                string tmpPath = finalPath + ".tmp";
+                string json = JsonSerializer.Serialize(new { RequestId = requestId, Text = text, IsError = isError });
+                File.WriteAllText(tmpPath, json);
+                File.Move(tmpPath, finalPath, true); // atomiskt, så CLI:t aldrig läser en halv fil
+            }
+            catch { }
+        }
+
+        private async void ProcessAiRequest(string prompt, string? cliRequestId = null, string? workingDir = null)
         {
             isInteracting = true;
             _interactionTimer?.Stop();
@@ -733,7 +830,7 @@ namespace SlimeHelper
             SpeechText.Text = "Hmm... let me think...";
             SpeechText.Foreground = Brushes.Black;
             SpeechBubble.Visibility = Visibility.Visible;
-            ShowSlimeReaction("FUNNY", "");
+            ShowSlimeReaction("THINKING", "");
 
             try
             {
@@ -746,37 +843,102 @@ namespace SlimeHelper
                     throw new InvalidOperationException($"Missing API Key for {settings.SelectedProvider}. Check settings!");
                 }
 
-                // 1. Vilken konversationstråd är vi i? (Letar efter första #taggen, annars "General")
+                // 1. Vilken konversationstråd är vi i? 
+                // 1. Vilken konversationstråd är vi i?
                 string activeThread = "General";
                 var words = prompt.Split(new[] { ' ', '\n', '\r', ',', '.', '?', '!' }, StringSplitOptions.RemoveEmptyEntries);
-                var firstTag = words.FirstOrDefault(w => w.StartsWith("#"));
-                if (firstTag != null) activeThread = firstTag.ToLowerInvariant();
 
-                // 2. Bygg kontext (Obsidian & Workspace)
+                // Bundna repos nämnda i prompten (med eller utan #)
+                string cwdHint = "";
+                var boundRepos = _brainManager.GetBoundReposFromPrompt(prompt);
+                var boundPaths = boundRepos.Select(r => r.Path).ToList();
+                string targetRepoPath = boundRepos.Count > 0 ? boundRepos[0].Path : "";
+
+                if (boundRepos.Count > 0)
+                {
+                    activeThread = boundRepos[0].Tag;
+                }
+                else
+                {
+                    // Explicit #tagg som inte är bunden -> tydligt besked i stället för påhittade verktyg
+                    var firstTag = words.FirstOrDefault(w => w.StartsWith("#"));
+                    if (firstTag != null)
+                    {
+                        SpeechText.Text = $"Jag har inget repo bundet till {firstTag.ToLowerInvariant()}. Gå till repots mapp och kör: slime bind {firstTag.TrimStart('#')}";
+                        WriteCliResponse(cliRequestId, SpeechText.Text, true);
+                        ShowSlimeReaction("UNSURE", "");
+                        StartInteractionTimer(8);
+                        return;
+                    }
+
+                    // Ingen tagg i prompten: står CLI:t i ett bundet repo (eller en undermapp) använder vi det
+                    var cwdRepo = _brainManager.FindBoundRepoForDirectory(workingDir);
+                    if (cwdRepo != null)
+                    {
+                        boundRepos.Add((cwdRepo.Value.Tag, cwdRepo.Value.Path));
+                        boundPaths.Add(cwdRepo.Value.Path);
+                        targetRepoPath = cwdRepo.Value.Path;
+                        activeThread = cwdRepo.Value.Tag;
+
+                        string relCwd = Path.GetRelativePath(cwdRepo.Value.Path, workingDir!).Replace('\\', '/');
+                        if (relCwd == ".")
+                        {
+                            cwdHint = $"[CLI Location] The user's terminal is in the ROOT of the bound workspace '{cwdRepo.Value.Tag}' ({cwdRepo.Value.Path}).";
+                        }
+                        else
+                        {
+                            cwdHint = $"[CLI Location] The user's terminal is in the subfolder '{relCwd}' of the bound workspace '{cwdRepo.Value.Tag}' ({cwdRepo.Value.Path}). " +
+                                      $"Relative file names the user mentions most likely refer to that folder (try '{relCwd}/<name>' first).";
+                        }
+                    }
+                }
+
+                // Platsraden följer alltid med när prompten kommer från CLI:t, så hon aldrig behöver gissa var användaren är
+                if (string.IsNullOrEmpty(cwdHint) && !string.IsNullOrWhiteSpace(workingDir))
+                {
+                    cwdHint = $"[CLI Location] The user's terminal is in '{workingDir}'.";
+                }
+                if (!string.IsNullOrEmpty(cwdHint))
+                {
+                    cwdHint += " If asked where you or the user are, or what the current folder is, answer from this line and never guess.";
+                }
+
                 string standardContext = ContextManager.BuildFullContext(settings, prompt, lastStatus);
                 string tagContext = "";
-                var boundPaths = _brainManager.GetBoundPathsFromPrompt(prompt);
 
                 foreach (var path in boundPaths)
                 {
                     tagContext += $"\n[Bound Context for {new DirectoryInfo(path).Name}]\n";
-                    string readmeFile = Directory.GetFiles(path, "README.md", SearchOption.TopDirectoryOnly).FirstOrDefault();
+                    string? readmeFile = Directory.GetFiles(path, "README.md", SearchOption.TopDirectoryOnly).FirstOrDefault();
                     if (readmeFile != null)
                     {
                         string readmeContent = File.ReadAllText(readmeFile);
                         tagContext += $"--- README.md ---\n{(readmeContent.Length > 1000 ? readmeContent.Substring(0, 1000) + "..." : readmeContent)}\n";
                     }
+
+                    // Sök i det faktiska kod-repot
                     var searchResults = ObsidianService.SearchVaultContent(path, prompt, 2);
                     if (searchResults.Any())
                     {
-                        tagContext += "--- Relevant Files Found ---\n" + string.Join("\n", searchResults) + "\n";
+                        tagContext += "--- Relevant Files Found in Repo ---\n" + string.Join("\n", searchResults) + "\n";
                     }
                 }
 
-                // 3. Hämta de senaste meddelandena för denna specifika tråd
-                string historyContext = _brainManager.GetHistoryContext(activeThread, 6);
+                // Sök även i Slimes EGNA anteckningar för detta repo!
+                if (activeThread != "General")
+                {
+                    string brainRepoPath = _brainManager.GetRepoBrainPath(activeThread);
+                    if (!string.IsNullOrEmpty(brainRepoPath))
+                    {
+                        var brainResults = ObsidianService.SearchVaultContent(brainRepoPath, prompt, 3);
+                        if (brainResults.Any())
+                        {
+                            tagContext += "--- Slime's Internal Notes for this Repo ---\n" + string.Join("\n", brainResults) + "\n";
+                        }
+                    }
+                }
 
-                // 4. Sy ihop hela prompten snyggt!
+                string historyContext = _brainManager.GetHistoryContext(activeThread, 6);
                 var queryBuilder = new System.Text.StringBuilder();
 
                 if (!string.IsNullOrWhiteSpace(standardContext) || !string.IsNullOrWhiteSpace(tagContext))
@@ -786,47 +948,103 @@ namespace SlimeHelper
                     if (!string.IsNullOrWhiteSpace(tagContext)) queryBuilder.AppendLine(tagContext);
                 }
 
+                // NYTT: Lägg till AI-verktygen dynamiskt via Tool Managern!
+                if (activeThread != "General")
+                {
+                    queryBuilder.AppendLine(SlimeToolManager.GetToolInstructions(targetRepoPath));
+                }
+
                 if (!string.IsNullOrWhiteSpace(historyContext))
                 {
                     queryBuilder.AppendLine($"\n[Conversation History ({activeThread})]");
                     queryBuilder.AppendLine(historyContext);
                 }
 
+                if (!string.IsNullOrEmpty(cwdHint)) queryBuilder.AppendLine("\n" + cwdHint);
+
                 queryBuilder.AppendLine("\n[User Prompt]");
                 queryBuilder.AppendLine(prompt);
 
                 string fullQuery = queryBuilder.ToString();
 
-                // 5. Skicka till AI
+                // Skicka till AI
+                // 1. Första AI-anropet
                 response = await AiService.AskSlime(fullQuery, provider, apiKey);
+                response = SlimeToolManager.StripHallucinatedTurns(response);
 
-                // 6. Spara samtalet till korttidsminnet
+                // 2. Kolla om hon använde verktyg (t.ex. [READ_FILE])
+                string followUpPrompt;
+                string cleanResponse = SlimeToolManager.ProcessResponse(response, activeThread, targetRepoPath, _brainManager, out followUpPrompt);
+
+                // Spara första steget i historiken
                 _brainManager.SaveMessage(activeThread, "User", prompt);
                 _brainManager.SaveMessage(activeThread, "Slime", response);
 
-                try
+                // 3. AGENT-LOOP: Om hon bad om att få läsa en fil, skicka tillbaka filinnehållet till henne i smyg!
+                var agentLog = new System.Text.StringBuilder();
+                int rounds = 0;
+                const int maxRounds = 4;
+
+                while (!string.IsNullOrEmpty(followUpPrompt) && rounds++ < maxRounds)
                 {
-                    string responseFile = Path.Combine(Path.GetTempPath(), "slime_response.json");
-                    File.WriteAllText(responseFile, JsonSerializer.Serialize(new { Response = response }));
+                    SpeechText.Text = cleanResponse; // UI:t visar t.ex. "Jag läser filen..."
 
-                    string logPath = Path.Combine(Path.GetTempPath(), "slime_ai_log.txt");
-                    File.AppendAllText(logPath, $"\n--- {DateTime.Now:yyyy-MM-dd HH:mm:ss} [{activeThread}] ---\nUSER: {prompt}\nSLIME: {response}\n");
+                    // Spara bara en kort markör i historiken, annars hamnar hela filinnehåll i chat_history.json
+                    string shortNote = followUpPrompt.Length > 400
+                        ? followUpPrompt.Substring(0, 400) + "... [truncated]"
+                        : followUpPrompt;
+                    _brainManager.SaveMessage(activeThread, "System", shortNote);
+
+                    // Hela uppföljningarna från den här frågan behålls i loopen så att hon minns tidigare rundor
+                    agentLog.AppendLine(followUpPrompt);
+                    agentLog.AppendLine();
+
+                    // Uppföljningen får verktygsinstruktionerna, den ursprungliga frågan och tydlig order att svara nu.
+                    // Annars "kollar" hon bara och visar aldrig resultatet för användaren.
+                    var loopBuilder = new System.Text.StringBuilder();
+                    if (!string.IsNullOrEmpty(cwdHint)) loopBuilder.AppendLine(cwdHint + "\n");
+                    if (activeThread != "General") loopBuilder.AppendLine(SlimeToolManager.GetToolInstructions(targetRepoPath));
+
+                    loopBuilder.AppendLine($"\n[Conversation History ({activeThread})]");
+                    loopBuilder.AppendLine(_brainManager.GetHistoryContext(activeThread, 6));
+
+                    loopBuilder.AppendLine("\n[Original User Request]");
+                    loopBuilder.AppendLine(prompt);
+
+                    loopBuilder.AppendLine("\n[Tool Results]");
+                    loopBuilder.AppendLine(agentLog.ToString());
+
+                    loopBuilder.AppendLine("[Instructions]");
+                    loopBuilder.AppendLine("The tool results above are the data you asked for. Answer the original user request NOW, based on them. " +
+                                           "Show the user the actual information (for example the file names or the file content) in your reply - do not just say that you looked. " +
+                                           "Do not call a tool again for something already in the results above. Only use another tool if you still need information that is not there.");
+
+                    string loopQuery = loopBuilder.ToString();
+
+                    response = await AiService.AskSlime(loopQuery, provider, apiKey);
+                    response = SlimeToolManager.StripHallucinatedTurns(response);
+
+                    // Processa nya verktyg i svaret; en ny uppföljning startar nästa runda
+                    cleanResponse = SlimeToolManager.ProcessResponse(response, activeThread, targetRepoPath, _brainManager, out followUpPrompt);
+
+                    _brainManager.SaveMessage(activeThread, "Slime", response);
                 }
-                catch { }
 
-                SpeechText.Text = response;
+                // 4. Visa det slutgiltiga resultatet i appen
+                SpeechText.Text = cleanResponse;
+                WriteCliResponse(cliRequestId, cleanResponse);
                 ShowSlimeReaction("IDLE", "");
                 PlaySounds("Idle.wav");
             }
             catch (Exception ex)
             {
                 SpeechText.Text = $"Brain freeze! {ex.Message}";
+                WriteCliResponse(cliRequestId, SpeechText.Text, true);
                 ShowSlimeReaction("ERROR", "");
                 SpeechText.Foreground = Brushes.Red;
-                response = SpeechText.Text;
             }
 
-            int displayTime = Math.Max(6, response.Length / 20);
+            int displayTime = Math.Max(6, SpeechText.Text.Length / 20);
             StartInteractionTimer(displayTime);
         }
 
@@ -892,7 +1110,10 @@ namespace SlimeHelper
                 currentSettings.ObsidianVaultPath = dialog.FolderName;
                 SaveFullSettings(currentSettings);
 
-                ShowTempMessage("Obsidian Vault connected!", "NOTES", 3);
+                // NYTT: Tvinga SlimeBrain att flytta och bygga upp sig i Obsidian-valvet!
+                _brainManager.RelocateToObsidian(dialog.FolderName);
+
+                ShowTempMessage("Obsidian Vault connected & Brain Created!", "NOTES", 3);
                 PlaySounds("Idle.wav");
             }
         }
@@ -1094,6 +1315,80 @@ namespace SlimeHelper
         }
 
 
+        //animation
+
+        private void StartMotionLoop()
+        {
+            _motionTimer = new DispatcherTimer(DispatcherPriority.Render)
+            {
+                Interval = TimeSpan.FromMilliseconds(16) // ~60 fps
+            };
+            _motionTimer.Tick += (s, e) => UpdateMotion();
+            _motionTimer.Start();
+        }
+
+        private void UpdateMotion()
+        {
+            double t = _motionClock.Elapsed.TotalSeconds;
+
+            // Kontinuerlig andning – körs alltid, oavsett vilken bild som visas
+            double breathScale = 1.0 + Math.Sin(t * 1.6) * 0.015;
+            double breathY = Math.Sin(t * 1.6) * 1.5;
+
+            // Impact-puls: dämpad fjäder som studsar tillbaka mot 0
+            const double stiffness = 220.0, damping = 18.0, dt = 0.016;
+            double force = -stiffness * _impactOffset - damping * _impactVelocity;
+            _impactVelocity += force * dt;
+            _impactOffset += _impactVelocity * dt;
+
+            // Sällsynt idle-flavor (bara i IDLE, ingen ny konst behövs)
+            if (DateTime.Now >= _nextIdleFlavorAt && !isInteracting && _currentPlayingState == "IDLE")
+            {
+                _ = PlayIdleFlavor();
+                _nextIdleFlavorAt = DateTime.Now.AddSeconds(rng.Next(20, 45));
+            }
+
+            SlimeScale.ScaleX = breathScale - _impactOffset * 0.4;
+            SlimeScale.ScaleY = breathScale + _impactOffset * 0.6;
+            SlimeTranslate.Y = breathY;
+            SlimeTranslate.X = _flavorX;
+            SlimeRotate.Angle = _flavorAngle;
+        }
+
+        // Anropas när en ny state faktiskt börjar spelas
+        private void TriggerImpact(double strength = 1.0)
+        {
+            _impactVelocity -= 6.0 * strength;
+        }
+
+        private async Task PlayIdleFlavor()
+        {
+            int variant = rng.Next(0, 2); // 0 = titta åt sidan, 1 = liten lutning tillbaka
+            double angle = variant == 0 ? (rng.Next(0, 2) == 0 ? -2 : 2) : 0;
+            double x = variant == 0 ? angle * 1.5 : 0;
+
+            await AnimateFlavorTo(angle, x, 400);
+            await Task.Delay(900);
+            await AnimateFlavorTo(0, 0, 500);
+        }
+
+        private async Task AnimateFlavorTo(double angle, double x, int durationMs)
+        {
+            double startAngle = _flavorAngle, startX = _flavorX;
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < durationMs)
+            {
+                double p = Math.Min(1.0, sw.ElapsedMilliseconds / (double)durationMs);
+                double eased = 1 - Math.Pow(1 - p, 3);
+                _flavorAngle = startAngle + (angle - startAngle) * eased;
+                _flavorX = startX + (x - startX) * eased;
+                await Task.Delay(16);
+            }
+            _flavorAngle = angle;
+            _flavorX = x;
+        }
+
+
         //LOAD AND SAVE FUNCTIONS
         private void SaveFullSettings(SlimeSettings settings)
         {
@@ -1140,81 +1435,118 @@ namespace SlimeHelper
                 {
                     _cliCommandWatcher.EnableRaisingEvents = false;
                     await Task.Delay(100);
-                    string json = File.ReadAllText(commandFile);
+                    string fileContent = File.ReadAllText(commandFile).Trim();
 
-                    if (!string.IsNullOrWhiteSpace(json))
+                    if (!string.IsNullOrWhiteSpace(fileContent))
                     {
-                        using var doc = JsonDocument.Parse(json);
-                        if (doc.RootElement.TryGetProperty("Prompt", out var promptProp))
-                        {
-                            string prompt = promptProp.GetString() ?? "";
+                        string prompt = "";
+                        string? requestId = null;
+                        string? workingDir = null;
 
-                            if (prompt.StartsWith("SET_SKIN:", StringComparison.OrdinalIgnoreCase))
+                        // Säker parsning: Kolla om det är JSON först
+                        if (fileContent.StartsWith("{"))
+                        {
+                            try
                             {
-                                string newSkin = prompt[9..].Trim();
-                                if (newSkin.Length > 0) newSkin = string.Concat(char.ToUpperInvariant(newSkin[0]), newSkin.AsSpan(1).ToString().ToLowerInvariant());
+                                using var doc = JsonDocument.Parse(fileContent);
+                                if (doc.RootElement.TryGetProperty("Prompt", out var promptProp))
+                                {
+                                    prompt = promptProp.GetString() ?? "";
+                                }
+                                if (doc.RootElement.TryGetProperty("RequestId", out var idProp))
+                                {
+                                    requestId = idProp.GetString();
+                                }
+                                if (doc.RootElement.TryGetProperty("WorkingDir", out var wdProp))
+                                {
+                                    workingDir = wdProp.GetString();
+                                }
+                            }
+                            catch { /* Svälj trasig JSON och gå vidare, faller tillbaka på tom sträng */ }
+                        }
+                        else
+                        {
+                            // Om det inte är formaterad JSON, anta att det är råtext från CLI
+                            prompt = fileContent;
+                        }
+
+                        if (prompt.StartsWith("SET_SKIN:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string newSkin = prompt[9..].Trim();
+                            if (newSkin.Length > 0) newSkin = string.Concat(char.ToUpperInvariant(newSkin[0]), newSkin.AsSpan(1).ToString().ToLowerInvariant());
+
+                            Dispatcher.Invoke(() =>
+                            {
+                                currentSkin = newSkin;
+                                var settings = LoadFullSettings();
+                                settings.CurrentSkin = currentSkin;
+                                SaveFullSettings(settings);
+                                LoadAnimations();
+                                StartMotionLoop();
+                                ShowTempMessage($"Changed skin to {currentSkin}!", "FUNNY", 3);
+                            });
+                        }
+                        else if (prompt.StartsWith("CAL_ADD:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string eventTitle = prompt[8..].Trim();
+
+                            _ = Task.Run(async () =>
+                            {
+                                bool success = await _calendarWatcher.AddEventAsync(eventTitle);
 
                                 Dispatcher.Invoke(() =>
                                 {
-                                    currentSkin = newSkin;
-                                    var settings = LoadFullSettings();
-                                    settings.CurrentSkin = currentSkin;
-                                    SaveFullSettings(settings);
-                                    LoadAnimations();
-                                    ShowTempMessage($"Changed skin to {currentSkin}!", "FUNNY", 3);
-                                });
-                            }
-                            else if (prompt.StartsWith("CAL_ADD:", StringComparison.OrdinalIgnoreCase))
-                            {
-                                string eventTitle = prompt[8..].Trim();
-
-                                _ = Task.Run(async () =>
-                                {
-                                    bool success = await _calendarWatcher.AddEventAsync(eventTitle);
-
-                                    Dispatcher.Invoke(() =>
+                                    if (success)
                                     {
-                                        if (success)
-                                        {
-                                            ShowTempMessage($"Added \"{eventTitle}\" to calendar!", "NOTES", 5);
-                                            PlaySounds("Idle.wav");
-                                        }
-                                        else
-                                        {
-                                            ShowTempMessage("Failed to add to calendar...", "ERROR", 5);
-                                        }
-                                    });
-                                });
-                            }
-                            else if (prompt.StartsWith("ANALYZE_DATASET:", StringComparison.OrdinalIgnoreCase))
-                            {
-                                string csvPath = prompt[16..].Trim();
-                                _ = Task.Run(() => HandleAnalyzeDatasetCommand(csvPath));
-                            }
-
-                            else if (prompt.StartsWith("BIND_REPO:", StringComparison.OrdinalIgnoreCase))
-                            {
-                                var parts = prompt[10..].Split('|');
-                                if (parts.Length == 2)
-                                {
-                                    string tag = parts[0];
-                                    string path = parts[1];
-
-                                    Dispatcher.Invoke(() =>
-                                    {
-                                        _brainManager.BindRepo(tag, path);
-                                        ShowTempMessage($"Bound {tag} to this folder! 🧠", "CUTE", 4);
+                                        ShowTempMessage($"Added \"{eventTitle}\" to calendar!", "NOTES", 5);
                                         PlaySounds("Idle.wav");
-                                    });
-                                }
-                            }
-
-                            else if (!string.IsNullOrEmpty(prompt))
-                            {
-                                Dispatcher.Invoke(() => ProcessAiRequest(prompt));
-                            }
-
+                                    }
+                                    else
+                                    {
+                                        ShowTempMessage("Failed to add to calendar...", "ERROR", 5);
+                                    }
+                                });
+                            });
                         }
+                        else if (prompt.StartsWith("ANALYZE_DATASET:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string csvPath = prompt[16..].Trim();
+                            _ = Task.Run(() => HandleAnalyzeDatasetCommand(csvPath));
+                        }
+                        else if (prompt.StartsWith("BIND_REPO:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var parts = prompt[10..].Split('|');
+                            if (parts.Length == 2)
+                            {
+                                string tag = parts[0];
+                                string path = parts[1];
+
+                                Dispatcher.Invoke(() =>
+                                {
+                                    var (ok, msg) = _brainManager.BindRepo(tag, path);
+                                    if (ok)
+                                    {
+                                        ShowTempMessage($"Bound {msg} to this folder! 🧠", "CUTE", 4);
+                                        PlaySounds("Idle.wav");
+                                        WriteCliResponse(requestId, $"Bound {msg} → {path}");
+                                    }
+                                    else
+                                    {
+                                        ShowTempMessage($"Bind failed: {msg}", "ERROR", 6);
+                                        WriteCliResponse(requestId, $"Bind failed: {msg}", true);
+                                    }
+                                });
+                            }
+                            else
+                            {
+                                WriteCliResponse(requestId, "Bind failed: ogiltigt kommando.", true);
+                            }
+                        }
+                        else if (!string.IsNullOrEmpty(prompt))
+                        {
+                            Dispatcher.Invoke(() => ProcessAiRequest(prompt, requestId, workingDir));
+                        }
+
                         File.WriteAllText(commandFile, "");
                     }
                 }

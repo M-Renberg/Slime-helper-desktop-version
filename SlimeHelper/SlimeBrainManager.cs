@@ -3,7 +3,6 @@ using System.Text.Json;
 
 namespace SlimeHelper
 {
-    // Döpt om för att undvika krock med din befintliga ChatMessage!
     public class SlimeMemoryMessage
     {
         public string Role { get; set; } = "";
@@ -12,22 +11,80 @@ namespace SlimeHelper
 
     public class SlimeBrainManager
     {
-        private readonly string _brainRootPath;
-        private readonly string _userFolder;
-        private readonly string _reposFolder;
-        private readonly string _memoryFolder;
-        private readonly string _profilePath;
-        private readonly string _historyPath;
+        private string _brainRootPath = "";
+        private string _userFolder = "";
+        private string _reposFolder = "";
+        private string _memoryFolder = "";
+        private string _profilePath = "";
+        private string _historyPath = "";
 
-        // Använder det nya namnet här
         private Dictionary<string, List<SlimeMemoryMessage>> _chatHistory = new();
 
         private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
+        // Tål kommentarer och trailing commas (gamla repo_map.json hade en //-kommentar)
+        private static readonly JsonSerializerOptions ReadOptions = new()
+        {
+            ReadCommentHandling = JsonCommentHandling.Skip,
+            AllowTrailingCommas = true
+        };
+
+        private string RepoMapPath => Path.Combine(_reposFolder, "repo_map.json");
+
         public SlimeBrainManager()
         {
-            string baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            _brainRootPath = Path.Combine(baseDir, "SlimeHelper", "SlimeBrain");
+            string settingsPath = Path.Combine(Path.GetTempPath(), "slime_settings.json");
+            string obsidianPath = "";
+            try
+            {
+                if (File.Exists(settingsPath))
+                {
+                    var jsonDoc = JsonDocument.Parse(File.ReadAllText(settingsPath));
+                    if (jsonDoc.RootElement.TryGetProperty("ObsidianVaultPath", out var obsProp))
+                    {
+                        obsidianPath = obsProp.GetString() ?? "";
+                    }
+                }
+            }
+            catch { }
+
+            SetupPaths(obsidianPath);
+            InitializeBrain();
+            LoadHistory();
+        }
+
+        public void RelocateToObsidian(string vaultPath)
+        {
+            // Ta med bindningarna från den gamla hjärnan, annars "försvinner" alla repos vid flytt
+            var oldMap = LoadRepoMap();
+
+            SetupPaths(vaultPath);
+            InitializeBrain();
+
+            if (oldMap.Count > 0)
+            {
+                var newMap = LoadRepoMap();
+                foreach (var kv in oldMap)
+                {
+                    if (!newMap.ContainsKey(kv.Key)) newMap[kv.Key] = kv.Value;
+                }
+                SaveRepoMap(newMap);
+            }
+
+            LoadHistory();
+        }
+
+        private void SetupPaths(string obsidianVaultPath)
+        {
+            if (!string.IsNullOrWhiteSpace(obsidianVaultPath) && Directory.Exists(obsidianVaultPath))
+            {
+                _brainRootPath = Path.Combine(obsidianVaultPath, "SlimeBrain");
+            }
+            else
+            {
+                string baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                _brainRootPath = Path.Combine(baseDir, "SlimeHelper", "SlimeBrain");
+            }
 
             _userFolder = Path.Combine(_brainRootPath, "user");
             _reposFolder = Path.Combine(_brainRootPath, "repos");
@@ -35,9 +92,6 @@ namespace SlimeHelper
 
             _profilePath = Path.Combine(_userFolder, "profile.json");
             _historyPath = Path.Combine(_memoryFolder, "chat_history.json");
-
-            InitializeBrain();
-            LoadHistory();
         }
 
         private void InitializeBrain()
@@ -46,10 +100,9 @@ namespace SlimeHelper
             Directory.CreateDirectory(_reposFolder);
             Directory.CreateDirectory(_memoryFolder);
 
-            string repoMapPath = Path.Combine(_reposFolder, "repo_map.json");
-            if (!File.Exists(repoMapPath))
+            if (!File.Exists(RepoMapPath))
             {
-                File.WriteAllText(repoMapPath, "{\n  // Map #hashtags to paths here\n}");
+                File.WriteAllText(RepoMapPath, "{}");
             }
 
             if (!File.Exists(_profilePath))
@@ -67,8 +120,11 @@ namespace SlimeHelper
                 if (File.Exists(_historyPath))
                 {
                     string json = File.ReadAllText(_historyPath);
-                    // Använder det nya namnet här också
                     _chatHistory = JsonSerializer.Deserialize<Dictionary<string, List<SlimeMemoryMessage>>>(json) ?? new();
+                }
+                else
+                {
+                    _chatHistory = new();
                 }
             }
             catch { _chatHistory = new(); }
@@ -85,7 +141,6 @@ namespace SlimeHelper
 
                 _chatHistory[threadId].Add(new SlimeMemoryMessage { Role = role, Content = content });
 
-                // Behåll bara de senaste 10 meddelandena (5 tur-och-retur) per tråd
                 if (_chatHistory[threadId].Count > 10)
                 {
                     _chatHistory[threadId].RemoveAt(0);
@@ -116,59 +171,188 @@ namespace SlimeHelper
 
         // --- REPO & FAKTA-HANTERING ---
 
-        public List<string> GetBoundPathsFromPrompt(string prompt)
+        /// <summary>Gör om "Test", "#Test" och " #test " till "#test".</summary>
+        public static string NormalizeTag(string tag)
         {
-            var paths = new List<string>();
-            string repoMapPath = Path.Combine(_reposFolder, "repo_map.json");
+            tag = (tag ?? "").Trim().ToLowerInvariant();
+            if (!tag.StartsWith("#")) tag = "#" + tag;
+            return tag;
+        }
 
+        private Dictionary<string, string> LoadRepoMap()
+        {
             try
             {
-                if (File.Exists(repoMapPath))
+                if (File.Exists(RepoMapPath))
                 {
-                    string json = File.ReadAllText(repoMapPath);
-                    if (json.Trim().StartsWith("{") && !json.Contains("// Map"))
+                    string json = File.ReadAllText(RepoMapPath);
+                    var loaded = JsonSerializer.Deserialize<Dictionary<string, string>>(json, ReadOptions);
+                    if (loaded != null)
                     {
-                        var map = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
-                        if (map != null)
-                        {
-                            var words = prompt.Split(new[] { ' ', '\n', '\r', ',', '.', '?', '!' }, StringSplitOptions.RemoveEmptyEntries);
-                            foreach (var word in words)
-                            {
-                                string tag = word.ToLowerInvariant();
-                                if (tag.StartsWith("#") && map.TryGetValue(tag, out string? mappedPath))
-                                {
-                                    if (mappedPath != null && Directory.Exists(mappedPath) && !paths.Contains(mappedPath))
-                                    {
-                                        paths.Add(mappedPath);
-                                    }
-                                }
-                            }
-                        }
+                        // Skiftlägesokänslig + normaliserade nycklar
+                        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var kv in loaded) map[NormalizeTag(kv.Key)] = kv.Value;
+                        return map;
                     }
                 }
             }
-            catch { }
-            return paths;
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to read repo_map.json: {ex.Message}");
+            }
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
 
-        public void BindRepo(string tag, string path)
+        private void SaveRepoMap(Dictionary<string, string> map)
         {
-            string repoMapPath = Path.Combine(_reposFolder, "repo_map.json");
-            var map = new Dictionary<string, string>();
+            File.WriteAllText(RepoMapPath, JsonSerializer.Serialize(map, JsonOptions));
+        }
 
+        /// <summary>
+        /// Hittar bundna repos som nämns i prompten, med eller utan inledande #
+        /// ("#testrepo" och "testrepo" matchar båda). Returnerar tagg (t.ex. "#testrepo") + sökväg.
+        /// </summary>
+        public List<(string Tag, string Path)> GetBoundReposFromPrompt(string prompt)
+        {
+            var result = new List<(string Tag, string Path)>();
+            if (string.IsNullOrWhiteSpace(prompt)) return result;
+
+            var map = LoadRepoMap();
+            if (map.Count == 0) return result;
+
+            var words = prompt.Split(new[] { ' ', '\n', '\r', '\t', ',', '.', '?', '!', ':', ';', '(', ')', '"', '\'', '/', '\\' },
+                                     StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var word in words)
+            {
+                string tag = NormalizeTag(word); // lägger till # om det saknas, gemener
+
+                if (map.TryGetValue(tag, out string? mappedPath)
+                    && !string.IsNullOrEmpty(mappedPath)
+                    && Directory.Exists(mappedPath)
+                    && !result.Any(r => r.Path == mappedPath))
+                {
+                    result.Add((tag, mappedPath));
+                }
+            }
+            return result;
+        }
+
+        public List<string> GetBoundPathsFromPrompt(string prompt)
+        {
+            return GetBoundReposFromPrompt(prompt).Select(r => r.Path).ToList();
+        }
+
+        /// <summary>
+        /// Hittar det bundna repo som angiven mapp är roten för, eller ligger i. Längsta matchande sökväg vinner.
+        /// Används av CLI:t: står du i en bunden mapp (eller en undermapp) vet Slime vilket repo du menar.
+        /// </summary>
+        public (string Tag, string Path)? FindBoundRepoForDirectory(string? directory)
+        {
+            if (string.IsNullOrWhiteSpace(directory)) return null;
+
+            char[] seps = { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar };
+            string dirFull;
+            try { dirFull = Path.GetFullPath(directory.Trim().Trim('"')).TrimEnd(seps); }
+            catch { return null; }
+
+            (string Tag, string Path)? best = null;
+
+            foreach (var kv in LoadRepoMap())
+            {
+                if (string.IsNullOrWhiteSpace(kv.Value) || !Directory.Exists(kv.Value)) continue;
+
+                string repoFull;
+                try { repoFull = Path.GetFullPath(kv.Value).TrimEnd(seps); }
+                catch { continue; }
+
+                bool isSame = dirFull.Equals(repoFull, StringComparison.OrdinalIgnoreCase);
+                bool isInside = dirFull.StartsWith(repoFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+                if ((isSame || isInside) && (best == null || repoFull.Length > best.Value.Path.Length))
+                {
+                    best = (kv.Key, repoFull);
+                }
+            }
+
+            return best;
+        }
+
+        /// <summary>Binder en #tagg till en mapp. Returnerar Success=false med orsak om det misslyckas.</summary>
+        public (bool Success, string Message) BindRepo(string tag, string path)
+        {
             try
             {
-                if (File.Exists(repoMapPath))
+                tag = NormalizeTag(tag);
+                path = (path ?? "").Trim().Trim('"');
+
+                if (tag == "#") return (false, "Empty tag");
+                if (string.IsNullOrWhiteSpace(path)) return (false, "Empty path");
+
+                string fullPath = Path.GetFullPath(path);
+                if (!Directory.Exists(fullPath)) return (false, $"Folder not found: {fullPath}");
+
+                // 1. Uppdatera repo_map.json
+                var map = LoadRepoMap();
+                map[tag] = fullPath;
+                SaveRepoMap(map);
+
+                // 2. Skapa en dedikerad mapp för repot inuti hjärnan
+                string cleanFolderName = tag.Replace("#", "").Trim();
+                string newRepoDir = Path.Combine(_reposFolder, cleanFolderName);
+
+                if (!Directory.Exists(newRepoDir))
                 {
-                    string json = File.ReadAllText(repoMapPath);
-                    if (!json.Trim().StartsWith("{") || json.Contains("// Map")) json = "{}";
-                    map = JsonSerializer.Deserialize<Dictionary<string, string>>(json) ?? new Dictionary<string, string>();
+                    Directory.CreateDirectory(newRepoDir);
+
+                    string initialNote = $"# Slime Notes for {tag}\nLinked path: {fullPath}\n\n- [ ] Initialized the project in brain.";
+                    File.WriteAllText(Path.Combine(newRepoDir, "notes.md"), initialNote);
                 }
 
-                map[tag] = path;
-                File.WriteAllText(repoMapPath, JsonSerializer.Serialize(map, JsonOptions));
+                return (true, tag);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to bind repo: {ex.Message}");
+                return (false, ex.Message);
+            }
+        }
+
+        public void SaveRepoNote(string tag, string filename, string content)
+        {
+            try
+            {
+                string cleanFolderName = tag.Replace("#", "").Trim();
+                string repoDir = Path.Combine(_reposFolder, cleanFolderName);
+
+                if (!Directory.Exists(repoDir))
+                {
+                    Directory.CreateDirectory(repoDir);
+                }
+
+                if (!filename.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+                {
+                    filename += ".md";
+                }
+
+                foreach (var c in Path.GetInvalidFileNameChars())
+                {
+                    filename = filename.Replace(c.ToString(), "");
+                }
+
+                File.WriteAllText(Path.Combine(repoDir, filename), content.Trim());
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to save repo note: {ex.Message}");
+            }
+        }
+
+        public string GetRepoBrainPath(string tag)
+        {
+            string cleanFolderName = tag.Replace("#", "").Trim();
+            string repoDir = Path.Combine(_reposFolder, cleanFolderName);
+            return Directory.Exists(repoDir) ? repoDir : "";
         }
 
         public SlimeMemory LoadMemory()

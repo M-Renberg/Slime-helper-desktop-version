@@ -11,7 +11,15 @@
                 return "My brain is empty! Please set my API Key in the settings menu first.";
             }
 
-            string fullPrompt = $"You are a witty, slightly snarky Slime assistant for a software developer. Keep your answers concise, helpful, and fun: {userPrompt}";
+            // Personan är kvar (kvick och lite snarkig), men själva innehållet hon ombeds ge (fillistor,
+            // filinnehåll, kod) ska alltid levereras i sin helhet. Det är bara småpratet som ska vara kort.
+            const string persona =
+                "You are a witty, slightly snarky Slime assistant for a software developer. Stay in character, keep your chit-chat short and fun, " +
+                "but ALWAYS deliver the information the user actually asked for in full (file lists, file contents, code, explanations). " +
+                "Never replace requested content with a remark that you looked it up or listed it. " +
+                "Never write lines that begin with \"System:\", \"Slime:\" or \"User:\" - the application adds those itself.";
+
+            string fullPrompt = $"{persona}{Environment.NewLine}{Environment.NewLine}{userPrompt}";
 
             try
             {
