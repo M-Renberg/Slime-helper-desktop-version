@@ -10,6 +10,9 @@ namespace SlimeCli
 
         static async Task Main(string[] args)
         {
+            // Annars visas emojis som "??" och å/ä/ö blir fel i svaret
+            Console.OutputEncoding = new UTF8Encoding(false);
+
             if (args.Length == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h")
             {
                 ShowHelp();
@@ -64,11 +67,11 @@ namespace SlimeCli
                     string tag = args[1];
                     if (!tag.StartsWith("#")) tag = "#" + tag; // Säkerställ att det alltid är en hashtag
                     string currentDir = Directory.GetCurrentDirectory();
-                    await ForwardToDesktopAppAsync($"BIND_REPO:{tag}|{currentDir}");
+                    await ForwardToDesktopAppAsync($"BIND_REPO:{tag}|{currentDir}", waitForReply: true);
                     break;
                 default:
                     string fullQuery = string.Join(" ", args);
-                    await ForwardToDesktopAppAsync(fullQuery);
+                    await ForwardToDesktopAppAsync(fullQuery, waitForReply: true);
                     break;
             }
         }
@@ -100,6 +103,7 @@ namespace SlimeCli
             PrintCommand("slime sql \"<task>\"", "Generate raw SQL code for a specific requirement.");
             PrintCommand("slime skin <color>", "Change the Slime skin (e.g. Pink, Green, Default).");
             PrintCommand("slime analyze <file>", "Analyze a CSV dataset and generate a Jupyter Notebook.");
+            PrintCommand("slime bind #<name>", "Bind repo to brain");
             PrintCommand("slime help", "Display this overview.");
             Console.WriteLine();
         }
@@ -338,22 +342,147 @@ namespace SlimeCli
             Console.ResetColor();
         }
 
-        private static async Task ForwardToDesktopAppAsync(string prompt)
+        private static string ResponseFilePath(string requestId) =>
+            Path.Combine(Path.GetTempPath(), $"slime_response_{requestId}.json");
+
+        private static async Task ForwardToDesktopAppAsync(string prompt, bool waitForReply = false)
         {
+            string requestId = Guid.NewGuid().ToString("N");
+
             var payload = new
             {
                 Action = "ASK_AI",
                 Prompt = prompt,
                 WorkingDir = Directory.GetCurrentDirectory(),
+                RequestId = requestId,
                 Timestamp = DateTime.UtcNow
             };
 
             string json = JsonSerializer.Serialize(payload);
+
+            if (waitForReply) CleanupOldResponseFiles();
+
             await File.WriteAllTextAsync(CommandFilePath, json);
 
+            if (!waitForReply)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"🟢 Slime received command...");
+                Console.ResetColor();
+                return;
+            }
+
+            await WaitForReplyAsync(requestId);
+        }
+
+        // Väntar först på att desktop-appen plockar upp kommandot, sedan på själva svaret.
+        private static async Task WaitForReplyAsync(string requestId)
+        {
+            // 1) Appen tömmer kommandofilen när den har tagit emot kommandot
+            bool pickedUp = false;
+            for (int i = 0; i < 50; i++) // ~5 sekunder
+            {
+                if (!CommandStillPending(requestId)) { pickedUp = true; break; }
+                await Task.Delay(100);
+            }
+
+            if (!pickedUp)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("⚠ Slime svarar inte - är SlimeHelper-appen igång?");
+                Console.ResetColor();
+                return;
+            }
+
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"🟢 Slime received command...");
+            Console.WriteLine("🟢 Slime received command...");
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.Write("Slime tänker... 0s");
+
+            // 2) Vänta på svaret (kan ta en stund, agent-loopen gör flera AI-anrop)
+            string responsePath = ResponseFilePath(requestId);
+            var started = DateTime.UtcNow;
+            var deadline = started.AddSeconds(180);
+            int lastShown = 0;
+
+            while (DateTime.UtcNow < deadline)
+            {
+                int secs = (int)(DateTime.UtcNow - started).TotalSeconds;
+                if (secs != lastShown)
+                {
+                    lastShown = secs;
+                    Console.Write($"\rSlime tänker... {secs}s");
+                }
+
+                if (File.Exists(responsePath))
+                {
+                    try
+                    {
+                        string text = await File.ReadAllTextAsync(responsePath);
+                        using var doc = JsonDocument.Parse(text);
+
+                        string answer = doc.RootElement.TryGetProperty("Text", out var tProp) ? tProp.GetString() ?? "" : "";
+                        bool isError = doc.RootElement.TryGetProperty("IsError", out var eProp) && eProp.ValueKind == JsonValueKind.True;
+
+                        try { File.Delete(responsePath); } catch { }
+
+                        ClearThinkingLine();
+                        Console.WriteLine();
+                        if (isError) Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine(answer);
+                        Console.ResetColor();
+                        Console.WriteLine();
+                        return;
+                    }
+                    catch (IOException) { /* filen skrivs just nu, försök igen */ }
+                    catch (UnauthorizedAccessException) { /* låst av annan process, försök igen */ }
+                    catch (JsonException) { /* ofullständig fil, försök igen */ }
+                }
+
+                await Task.Delay(200);
+            }
+
+            ClearThinkingLine();
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("⚠ Inget svar inom 3 minuter. Svaret kan fortfarande dyka upp i Slimes pratbubbla.");
+            Console.WriteLine($"  (CLI:t väntade på filen: {responsePath})");
             Console.ResetColor();
+        }
+
+        private static bool CommandStillPending(string requestId)
+        {
+            try
+            {
+                using var fs = new FileStream(CommandFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var reader = new StreamReader(fs);
+                return reader.ReadToEnd().Contains(requestId);
+            }
+            catch
+            {
+                return true; // låst eller saknas just nu: anta att den inte är upplockad än
+            }
+        }
+
+        private static void ClearThinkingLine()
+        {
+            Console.Write("\r" + new string(' ', 40) + "\r");
+            Console.ResetColor();
+        }
+
+        private static void CleanupOldResponseFiles()
+        {
+            try
+            {
+                foreach (var f in Directory.GetFiles(Path.GetTempPath(), "slime_response_*"))
+                {
+                    try
+                    {
+                        if (File.GetLastWriteTimeUtc(f) < DateTime.UtcNow.AddHours(-1)) File.Delete(f);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
         }
 
         private static void ShowSimpleDiff(string oldText, string newText)
@@ -427,7 +556,7 @@ namespace SlimeCli
                 }
 
                 using var client = new HttpClient();
-                string url = $"[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=){key}";
+                string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}";
                 var body = new { contents = new[] { new { parts = new[] { new { text = prompt } } } } };
                 var response = await client.PostAsync(url, new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
 

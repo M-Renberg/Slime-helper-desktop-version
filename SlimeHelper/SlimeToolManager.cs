@@ -19,6 +19,21 @@ namespace SlimeHelper
         private const int MaxReadsPerResponse = 5;
         private const int MaxReadChars = 20000;
 
+        // Sökning (SEARCH_FILES)
+        private const int SearchMaxResultsPerKind = 40;
+        private const int SearchMaxLinesPerFile = 3;
+        private const int SearchMaxFilesScanned = 3000;
+        private const long SearchMaxFileBytes = 500_000;
+
+        private static readonly HashSet<string> BinaryExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svgz",
+            ".wav", ".mp3", ".mp4", ".mov", ".avi", ".ogg",
+            ".zip", ".7z", ".gz", ".tar", ".rar", ".vsix", ".nupkg",
+            ".dll", ".exe", ".pdb", ".so", ".dylib", ".class", ".jar", ".bin", ".dat",
+            ".pdf", ".woff", ".woff2", ".ttf", ".otf", ".eot", ".db", ".sqlite"
+        };
+
         // --- SKYDD: känsliga filer och skrivförbjudna mappar ---
         // Mönster som aldrig får läsas eller skrivas (hemligheter, nycklar, inloggningsuppgifter).
         // Lägg till fler här vid behov. * fungerar som jokertecken.
@@ -55,6 +70,54 @@ namespace SlimeHelper
         // Modellen härmar historikformatet ("System: ...", "Slime: ...") och hittar på egna turer.
         private static readonly Regex FakeTurnRegex =
             new(@"^[ \t]*(?:System|Slime|User):[ \t]|\[SYSTEM INJECTION", RegexOptions.Multiline);
+
+        // Tydliga sökfrågor på svenska/engelska där söktermen går att plocka ut säkert.
+        // Används för att söka åt henne direkt i stället för att hoppas att modellen väljer rätt verktyg.
+        private static readonly Regex[] SearchIntentPatterns =
+        {
+            // Svenska
+            new(@"\bmed\s+ordet\s+[""'`]?(?<t>[^\s""'`,.?!]{2,})", RegexOptions.IgnoreCase),
+            new(@"\bordet\s+[""'`]?(?<t>[^\s""'`,.?!]{2,})", RegexOptions.IgnoreCase),
+            new(@"\bmed\s+[""'`]?(?<t>[^\s""'`,.?!]{2,})[""'`]?\s+i\s+sig\b", RegexOptions.IgnoreCase),
+            new(@"\b(?:innehåller|nämner|refererar\s+till)\s+[""'`]?(?<t>[^\s""'`,.?!]{2,})", RegexOptions.IgnoreCase),
+            new(@"\bvar\s+(?:används|anropas|definieras|refereras)\s+[""'`]?(?<t>[^\s""'`,.?!]{2,})", RegexOptions.IgnoreCase),
+            new(@"\banvändningar\s+av\s+[""'`]?(?<t>[^\s""'`,.?!]{2,})", RegexOptions.IgnoreCase),
+
+            // Engelska
+            new(@"\b(?:with|has|have)\s+the\s+word\s+[""'`]?(?<t>[^\s""'`,.?!]{2,})", RegexOptions.IgnoreCase),
+            new(@"\bthe\s+word\s+[""'`]?(?<t>[^\s""'`,.?!]{2,})", RegexOptions.IgnoreCase),
+            new(@"\bwith\s+[""'`]?(?<t>[^\s""'`,.?!]{2,})[""'`]?\s+in\s+(?:it|them)\b", RegexOptions.IgnoreCase),
+            new(@"\b(?:containing|contains?|mentioning|mentions?)\s+(?:the\s+)?[""'`]?(?<t>[^\s""'`,.?!]{2,})", RegexOptions.IgnoreCase),
+            new(@"\bwhere\s+is\s+[""'`]?(?<t>[^\s""'`,.?!]{2,})[""'`]?\s+(?:used|called|defined|referenced)", RegexOptions.IgnoreCase),
+            new(@"\busages?\s+of\s+[""'`]?(?<t>[^\s""'`,.?!]{2,})", RegexOptions.IgnoreCase)
+        };
+
+        private static readonly HashSet<string> SearchStopWords = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "the", "a", "an", "en", "ett", "att", "som", "och", "för", "from", "till", "något", "någon", "några", "that", "this", "det", "den", "ordet", "word"
+        };
+
+        /// <summary>
+        /// Returnerar söktermen om prompten tydligt ber om en sökning ("filer med ordet X i sig", "var används X",
+        /// "files containing X"). Annars null.
+        /// </summary>
+        public static string? ExtractSearchTerm(string prompt)
+        {
+            if (string.IsNullOrWhiteSpace(prompt)) return null;
+
+            foreach (var pattern in SearchIntentPatterns)
+            {
+                var m = pattern.Match(prompt);
+                if (!m.Success) continue;
+
+                string term = m.Groups["t"].Value.Trim();
+                if (term.Length >= 2 && !SearchStopWords.Contains(term)) return term;
+            }
+            return null;
+        }
+
+        /// <summary>Kör samma sökning som SEARCH_FILES-verktyget (namn + innehåll).</summary>
+        public static string RunSearch(string basePath, string term) => SearchWorkspace(basePath, term);
 
         /// <summary>
         /// Tar bort ett inledande "Slime:" och klipper svaret vid första påhittade "System:/Slime:/User:"-tur,
@@ -107,6 +170,16 @@ namespace SlimeHelper
                 sb.AppendLine("[LIST_FILES: src/Services]");
                 sb.AppendLine("After you see the listing, use READ_FILE to open the files you actually need.");
 
+                sb.AppendLine($"\n6. SEARCH THE WORKSPACE ({targetRepoPath}):");
+                sb.AppendLine("To find files by NAME or CONTENT (e.g. 'every file mentioning X', 'where is Y used'), use this. It searches all file names and all text file contents (case-insensitive) and returns matching paths with the matching line. NEVER guess which files contain something - search for it:");
+                sb.AppendLine("[SEARCH_FILES: text to find]");
+                sb.AppendLine("A directory listing (LIST_FILES) is limited and does not show file contents, so it cannot answer 'which files contain X'.");
+
+                sb.AppendLine("\nWHICH TOOL TO USE (the user may write in any language, e.g. Swedish):");
+                sb.AppendLine("- Show the folder structure, or what a folder contains -> LIST_FILES.");
+                sb.AppendLine("- 'which files contain / mention / use / have the word X in them', 'list all files with X in them', 'filer med ordet X i sig', 'var används X', 'hitta X' -> SEARCH_FILES with X as the text. NEVER answer these from a LIST_FILES result: a listing only shows names, not contents.");
+                sb.AppendLine("- Open one specific file -> READ_FILE.");
+
                 sb.AppendLine("\nPROTECTED FILES: secrets and credentials (.env files, private keys, certificates, credentials files) and .git internals can NEVER be read or written. Files marked (protected) in a listing are off-limits - do not try to open them. If the user asks for one, explain that it is protected.");
             }
 
@@ -158,6 +231,9 @@ namespace SlimeHelper
 
                 // Verktyg 5 (Lista filer) - körs före READ_FILE så att båda kan användas i samma svar
                 cleanResponse = ProcessListFiles(cleanResponse, targetRepoPath, activeThread, ref followUpPrompt);
+
+                // Verktyg 6 (Söka efter filnamn och innehåll)
+                cleanResponse = ProcessSearchFiles(cleanResponse, targetRepoPath, activeThread, ref followUpPrompt);
 
                 // Verktyg 4 (Läsa filer) - flera taggar per svar stöds
                 cleanResponse = ProcessReadFiles(cleanResponse, targetRepoPath, activeThread, ref followUpPrompt);
@@ -232,6 +308,207 @@ namespace SlimeHelper
             }
 
             return text;
+        }
+
+        // --- SEARCH_FILES ---
+
+        private static string ProcessSearchFiles(string text, string basePath, string activeThread, ref string followUpPrompt)
+        {
+            const string tagStart = "[SEARCH_FILES";
+            int handled = 0;
+            int idx = text.IndexOf(tagStart);
+
+            while (idx != -1 && handled < 3)
+            {
+                int end = text.IndexOf("]", idx);
+                if (end == -1) break;
+
+                string query = text.Substring(idx + tagStart.Length, end - (idx + tagStart.Length))
+                                   .TrimStart(':').Trim().Trim('"', '\'', '`');
+                if (query.Length > 100) query = query.Substring(0, 100);
+
+                string tagBlock = text.Substring(idx, (end + 1) - idx);
+                handled++;
+
+                string followUp;
+                string uiMessage;
+
+                if (string.IsNullOrWhiteSpace(query))
+                {
+                    followUp = "[SYSTEM INJECTION: Your SEARCH_FILES call had no search text. Tell the user, or try again with the text to search for.]";
+                    uiMessage = "\n*(Jag försökte söka men glömde vad jag skulle leta efter ❌)*\n";
+                }
+                else
+                {
+                    string results = SearchWorkspace(basePath, query);
+                    followUp = $"[SYSTEM INJECTION: Search results for \"{query}\" in the workspace:]\n\n```\n{results}\n```\n\n" +
+                               "Now continue fulfilling the user's request. Show the user the matching files from these results. " +
+                               "Use the exact paths shown. If a section ends with '... (+N more)', tell the user that N more exist that you were not shown. Never add entries that are not in the results.";
+                    uiMessage = $"\n*(Jag söker efter \"{query}\" i projektet... 🔍)*\n";
+                }
+
+                followUpPrompt = string.IsNullOrEmpty(followUpPrompt) ? followUp : followUpPrompt + "\n\n" + followUp;
+                text = text.Replace(tagBlock, uiMessage);
+                idx = text.IndexOf(tagStart);
+            }
+
+            return text;
+        }
+
+        private static bool IsSkippedDir(string name)
+        {
+            return IgnoredDirs.Contains(name)
+                   || (name.StartsWith(".") && !name.Equals(".github", StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// Söker i filnamn och textinnehåll (skiftlägesokänsligt). Hoppar över byggmappar, dolda mappar, länkar,
+        /// binärfiler, stora filer och skyddade filer (deras innehåll läses aldrig).
+        /// </summary>
+        private static string SearchWorkspace(string rootPath, string query)
+        {
+            var nameHits = new List<string>();
+            var contentHits = new List<string>();
+            int nameTotal = 0, contentTotal = 0, scanned = 0;
+            bool scanLimitHit = false;
+
+            var pending = new Stack<string>();
+            pending.Push(rootPath);
+
+            while (pending.Count > 0 && !scanLimitHit)
+            {
+                string dir = pending.Pop();
+
+                string[] files;
+                string[] subDirs;
+                try
+                {
+                    files = Directory.GetFiles(dir);
+                    subDirs = Directory.GetDirectories(dir);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                foreach (var f in files.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (++scanned > SearchMaxFilesScanned) { scanLimitHit = true; break; }
+
+                    string name = Path.GetFileName(f);
+                    string rel = Path.GetRelativePath(rootPath, f).Replace('\\', '/');
+                    bool sensitive = IsSensitiveFileName(name);
+
+                    if (name.Contains(query, StringComparison.OrdinalIgnoreCase))
+                    {
+                        nameTotal++;
+                        if (nameHits.Count < SearchMaxResultsPerKind)
+                            nameHits.Add(sensitive ? rel + " (protected)" : rel);
+                    }
+
+                    if (sensitive || IsLink(f)) continue;
+
+                    if (TryFindInFile(f, query, out int matches, out List<string> matchLines))
+                    {
+                        contentTotal++;
+                        if (contentHits.Count < SearchMaxResultsPerKind)
+                        {
+                            var entry = new System.Text.StringBuilder();
+                            entry.Append($"{rel} ({matches} match{(matches == 1 ? "" : "es")})");
+                            foreach (var ml in matchLines) entry.Append("\n      " + ml);
+                            if (matches > matchLines.Count) entry.Append($"\n      ... (+{matches - matchLines.Count} more matches in this file)");
+                            contentHits.Add(entry.ToString());
+                        }
+                    }
+                }
+
+                // Läggs på stacken i omvänd ordning så att mapparna besöks i bokstavsordning
+                foreach (var d in subDirs.OrderByDescending(x => x, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (IsSkippedDir(Path.GetFileName(d)) || IsLink(d)) continue;
+                    pending.Push(d);
+                }
+            }
+
+            var sb = new System.Text.StringBuilder();
+            string rootName = Path.GetFileName(rootPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            sb.AppendLine($"Search for \"{query}\" in {rootName}/ ({Math.Min(scanned, SearchMaxFilesScanned)} files scanned; build folders, hidden folders, binary files and protected files' contents are skipped)");
+
+            sb.AppendLine();
+            sb.AppendLine($"Files whose NAME contains it ({nameTotal}):");
+            if (nameHits.Count == 0) sb.AppendLine("  (none)");
+            foreach (var h in nameHits) sb.AppendLine("  " + h);
+            if (nameTotal > nameHits.Count) sb.AppendLine($"  ... (+{nameTotal - nameHits.Count} more)");
+
+            sb.AppendLine();
+            sb.AppendLine($"Files whose CONTENT contains it ({contentTotal}):");
+            if (contentHits.Count == 0) sb.AppendLine("  (none)");
+            foreach (var h in contentHits) sb.AppendLine("  " + h);
+            if (contentTotal > contentHits.Count) sb.AppendLine($"  ... (+{contentTotal - contentHits.Count} more)");
+
+            if (scanLimitHit)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"(The search stopped after {SearchMaxFilesScanned} files. Use a more specific search text to narrow it down.)");
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        private static bool TryFindInFile(string path, string query, out int matches, out List<string> matchLines)
+        {
+            matches = 0;
+            matchLines = new List<string>();
+
+            try
+            {
+                if (BinaryExtensions.Contains(Path.GetExtension(path))) return false;
+
+                long length = new FileInfo(path).Length;
+                if (length == 0 || length > SearchMaxFileBytes) return false;
+                if (LooksBinary(path)) return false;
+
+                int lineNo = 0;
+                foreach (var line in File.ReadLines(path))
+                {
+                    lineNo++;
+                    if (!line.Contains(query, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    matches++;
+                    if (matchLines.Count < SearchMaxLinesPerFile)
+                    {
+                        string trimmed = line.Trim();
+                        if (trimmed.Length > 100) trimmed = trimmed.Substring(0, 100) + "...";
+                        matchLines.Add($"line {lineNo}: {trimmed}");
+                    }
+                }
+
+                return matches > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // En fil med NUL-byte i början räknas som binär
+        private static bool LooksBinary(string path)
+        {
+            try
+            {
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                byte[] buffer = new byte[4096];
+                int read = fs.Read(buffer, 0, buffer.Length);
+                for (int i = 0; i < read; i++)
+                {
+                    if (buffer[i] == 0) return true;
+                }
+                return false;
+            }
+            catch
+            {
+                return true;
+            }
         }
 
         // --- LIST_FILES ---

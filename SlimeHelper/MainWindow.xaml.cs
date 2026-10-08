@@ -962,6 +962,21 @@ namespace SlimeHelper
 
                 if (!string.IsNullOrEmpty(cwdHint)) queryBuilder.AppendLine("\n" + cwdHint);
 
+                // Tydliga sökfrågor ("filer med ordet X i sig", "var används X") söker vi åt henne direkt.
+                // Då behöver hon inte välja rätt verktyg själv, och svaret bygger på riktiga träffar.
+                string? preSearchTerm = !string.IsNullOrEmpty(targetRepoPath) ? SlimeToolManager.ExtractSearchTerm(prompt) : null;
+                if (preSearchTerm != null)
+                {
+                    string preResults = SlimeToolManager.RunSearch(targetRepoPath, preSearchTerm);
+                    queryBuilder.AppendLine($"\n[Pre-fetched Search Results for \"{preSearchTerm}\"]");
+                    queryBuilder.AppendLine("```");
+                    queryBuilder.AppendLine(preResults);
+                    queryBuilder.AppendLine("```");
+                    queryBuilder.AppendLine("These results were already fetched for the user's request. Answer directly from them: show the actual matching files and lines, using the exact paths shown. " +
+                                            "If a section ends with '... (+N more)', tell the user that N more exist that you were not shown. Never add entries that are not in the results. " +
+                                            "Do NOT use LIST_FILES or SEARCH_FILES for this again.");
+                }
+
                 queryBuilder.AppendLine("\n[User Prompt]");
                 queryBuilder.AppendLine(prompt);
 
