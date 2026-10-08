@@ -993,7 +993,7 @@ namespace SlimeHelper
 
                 // Spara första steget i historiken
                 _brainManager.SaveMessage(activeThread, "User", prompt);
-                _brainManager.SaveMessage(activeThread, "Slime", response);
+                _brainManager.SaveMessage(activeThread, "Slime", SlimeToolManager.CompactForHistory(response));
 
                 // 3. AGENT-LOOP: Om hon bad om att få läsa en fil, skicka tillbaka filinnehållet till henne i smyg!
                 var agentLog = new System.Text.StringBuilder();
@@ -1042,7 +1042,7 @@ namespace SlimeHelper
                     // Processa nya verktyg i svaret; en ny uppföljning startar nästa runda
                     cleanResponse = SlimeToolManager.ProcessResponse(response, activeThread, targetRepoPath, _brainManager, out followUpPrompt);
 
-                    _brainManager.SaveMessage(activeThread, "Slime", response);
+                    _brainManager.SaveMessage(activeThread, "Slime", SlimeToolManager.CompactForHistory(response));
                 }
 
                 // 4. Visa det slutgiltiga resultatet i appen

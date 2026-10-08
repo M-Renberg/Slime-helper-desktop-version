@@ -17,6 +17,8 @@ namespace SlimeHelper
         private const int ListMaxFilesPerDir = 15;
 
         private const int MaxReadsPerResponse = 5;
+        private const int MaxReadRangeLines = 400;
+        private const int MaxEditBlocksPerResponse = 5;
         private const int MaxReadChars = 20000;
 
         // Sökning (SEARCH_FILES)
@@ -97,6 +99,20 @@ namespace SlimeHelper
             "the", "a", "an", "en", "ett", "att", "som", "och", "för", "from", "till", "något", "någon", "några", "that", "this", "det", "den", "ordet", "word"
         };
 
+        private static readonly Regex HistoryBlockRegex =
+            new(@"\[(?<tag>WRITE_DOC|WRITE_CODE|CREATE_FILE|SAVE_NOTE|EDIT_FILE):\s*(?<path>[^\]\r\n]+?)\s*\].*?\[/\k<tag>\]", RegexOptions.Singleline);
+
+        /// <summary>
+        /// Kortar ner verktygsblock (hela kodfiler och ändringar) till en rad innan svaret sparas i historiken,
+        /// så att kod inte spelas upp igen i varje senare prompt. Raden liknar medvetet inte verktygssyntaxen,
+        /// så att hon inte härmar den.
+        /// </summary>
+        public static string CompactForHistory(string response)
+        {
+            if (string.IsNullOrEmpty(response)) return response;
+            return HistoryBlockRegex.Replace(response, m => $"*(utfört: {m.Groups["tag"].Value} {m.Groups["path"].Value.Trim()})*");
+        }
+
         /// <summary>
         /// Returnerar söktermen om prompten tydligt ber om en sökning ("filer med ordet X i sig", "var används X",
         /// "files containing X"). Annars null.
@@ -163,6 +179,7 @@ namespace SlimeHelper
                 sb.AppendLine("[READ_FILE: relative_path/filename.ext]");
                 sb.AppendLine("IMPORTANT: ALL paths are relative to the workspace root. NEVER prefix paths with the repo name or the #tag (the repo's README is simply README.md, not repo/README.md).");
                 sb.AppendLine("You can read several files in ONE response by outputting several [READ_FILE: ...] tags (max 5 per response). Large files are truncated.");
+                sb.AppendLine("For a large file, read just a part by adding a line range (max 400 lines): [READ_FILE: relative_path/filename.ext | 100-200]. SEARCH_FILES gives you line numbers to aim at.");
 
                 sb.AppendLine($"\n5. LIST FILES IN WORKSPACE ({targetRepoPath}):");
                 sb.AppendLine("To see the project's folder/file structure, use this BEFORE guessing file names. Use '.' for the project root, or a relative folder path:");
@@ -179,6 +196,28 @@ namespace SlimeHelper
                 sb.AppendLine("- Show the folder structure, or what a folder contains -> LIST_FILES.");
                 sb.AppendLine("- 'which files contain / mention / use / have the word X in them', 'list all files with X in them', 'filer med ordet X i sig', 'var används X', 'hitta X' -> SEARCH_FILES with X as the text. NEVER answer these from a LIST_FILES result: a listing only shows names, not contents.");
                 sb.AppendLine("- Open one specific file -> READ_FILE.");
+                sb.AppendLine("- Change part of an existing file (add, replace or delete code) -> EDIT_FILE.");
+                sb.AppendLine("- Create a NEW file -> WRITE_CODE (code) or WRITE_DOC (documentation).");
+
+                sb.AppendLine($"\n7. EDIT AN EXISTING FILE ({targetRepoPath}):");
+                sb.AppendLine("To change part of an existing file use find-and-replace blocks. This is the PREFERRED way to modify code. You may put several FIND/REPLACE pairs in one EDIT_FILE block; they are applied in order, all or nothing.");
+                sb.AppendLine("[EDIT_FILE: relative_path/filename.ext]");
+                sb.AppendLine("[FIND]");
+                sb.AppendLine("exact existing text copied from the file (a few unique lines)");
+                sb.AppendLine("[/FIND]");
+                sb.AppendLine("[REPLACE]");
+                sb.AppendLine("the new text");
+                sb.AppendLine("[/REPLACE]");
+                sb.AppendLine("[/EDIT_FILE]");
+
+                sb.AppendLine("\nCODING RULES:");
+                sb.AppendLine("- Read before you edit: use READ_FILE first (with a line range for big files).");
+                sb.AppendLine("- FIND must match the file EXACTLY (characters and indentation) and must be unique in the file, so include enough surrounding lines. Never put line numbers or ``` fences inside FIND or REPLACE.");
+                sb.AppendLine("- Keep edits small and focused. Do not rewrite whole files, and follow the existing code style and indentation.");
+                sb.AppendLine("- Use WRITE_CODE only to create NEW files. Existing files larger than 20000 characters cannot be overwritten - use EDIT_FILE.");
+                sb.AppendLine("- Do not paste the code again in your normal reply. Briefly say what you changed and why.");
+                sb.AppendLine("- If an edit fails you will be told why. Read the file again and retry with corrected FIND text.");
+                sb.AppendLine("- Every file you change is backed up automatically.");
 
                 sb.AppendLine("\nPROTECTED FILES: secrets and credentials (.env files, private keys, certificates, credentials files) and .git internals can NEVER be read or written. Files marked (protected) in a listing are off-limits - do not try to open them. If the user asks for one, explain that it is protected.");
             }
@@ -203,7 +242,7 @@ namespace SlimeHelper
                 // Verktyg 2 (Skriva dokumentation)
                 cleanResponse = ExtractAndExecute(cleanResponse, "[WRITE_DOC:", "[/WRITE_DOC]", (filename, content) =>
                 {
-                    if (!TryWriteFile(targetRepoPath, StripTagPrefix(targetRepoPath, filename, activeThread), content, out string error))
+                    if (!TryWriteFile(targetRepoPath, StripTagPrefix(targetRepoPath, filename, activeThread), content, brainManager, activeThread, out string error))
                         return $"\n*(Jag fick inte skriva {filename}: {error} 🔒)*\n";
                     return $"\n*(Jag skapade dokumentationen {filename} i ditt projekt! 📝)*\n";
                 });
@@ -211,7 +250,7 @@ namespace SlimeHelper
                 // Verktyg 3 (Skriva källkod)
                 cleanResponse = ExtractAndExecute(cleanResponse, "[WRITE_CODE:", "[/WRITE_CODE]", (filename, content) =>
                 {
-                    if (!TryWriteFile(targetRepoPath, StripTagPrefix(targetRepoPath, filename, activeThread), content, out string error))
+                    if (!TryWriteFile(targetRepoPath, StripTagPrefix(targetRepoPath, filename, activeThread), content, brainManager, activeThread, out string error))
                         return $"\n*(Jag fick inte skriva {filename}: {error} 🔒)*\n";
                     return $"\n*(Jag skrev källkod till filen {filename} i ditt projekt! 💻)*\n";
                 });
@@ -224,10 +263,13 @@ namespace SlimeHelper
                         filename = filename.Substring(activeThread.Length).Trim('/', '\\');
                     }
 
-                    if (!TryWriteFile(targetRepoPath, filename, content, out string error))
+                    if (!TryWriteFile(targetRepoPath, filename, content, brainManager, activeThread, out string error))
                         return $"\n*(Jag fick inte skriva {filename}: {error} 🔒)*\n";
                     return $"\n*(Jag skapade filen {filename} i ditt projekt! 📝)*\n";
                 });
+
+                // Verktyg 7 (Ändra befintlig fil med FIND/REPLACE)
+                cleanResponse = ProcessEditFiles(cleanResponse, targetRepoPath, activeThread, brainManager, ref followUpPrompt);
 
                 // Verktyg 5 (Lista filer) - körs före READ_FILE så att båda kan användas i samma svar
                 cleanResponse = ProcessListFiles(cleanResponse, targetRepoPath, activeThread, ref followUpPrompt);
@@ -242,7 +284,7 @@ namespace SlimeHelper
             return cleanResponse.Trim();
         }
 
-        // --- READ_FILE (flera per svar) ---
+        // --- READ_FILE (flera per svar, med valfritt radintervall) ---
 
         private static string ProcessReadFiles(string text, string basePath, string activeThread, ref string followUpPrompt)
         {
@@ -260,35 +302,75 @@ namespace SlimeHelper
                 string tagBlock = text.Substring(idx, (end + 1) - idx);
                 string uiMessage;
 
+                // Radintervall: [READ_FILE: path | 100-200]
+                string requested = filename;
+                int rangeFrom = 0, rangeTo = 0;
+                int bar = filename.IndexOf('|');
+                if (bar >= 0)
+                {
+                    requested = filename.Substring(0, bar).Trim();
+                    var rm = Regex.Match(filename.Substring(bar + 1), @"(\d+)\s*-\s*(\d+)");
+                    if (rm.Success)
+                    {
+                        int.TryParse(rm.Groups[1].Value, out rangeFrom);
+                        int.TryParse(rm.Groups[2].Value, out rangeTo);
+                    }
+                }
+                bool ranged = rangeFrom > 0 && rangeTo >= rangeFrom;
+
                 if (reads >= MaxReadsPerResponse)
                 {
-                    injected.Add($"[SKIPPED: {filename} - only {MaxReadsPerResponse} files can be read per response. Ask for it again if you still need it.]");
-                    uiMessage = $"\n*(Jag hann inte läsa {filename} den här gången - max {MaxReadsPerResponse} filer åt gången.)*\n";
+                    injected.Add($"[SKIPPED: {requested} - only {MaxReadsPerResponse} files can be read per response. Ask for it again if you still need it.]");
+                    uiMessage = $"\n*(Jag hann inte läsa {requested} den här gången - max {MaxReadsPerResponse} filer åt gången.)*\n";
                 }
                 else
                 {
                     reads++;
-                    string? fullPath = ResolveSafePath(basePath, StripTagPrefix(basePath, filename, activeThread));
+                    string? fullPath = ResolveSafePath(basePath, StripTagPrefix(basePath, requested, activeThread));
 
                     if (fullPath != null && IsSensitivePath(basePath, fullPath))
                     {
-                        injected.Add($"[ACCESS DENIED: {filename} is a protected file (secrets/credentials) and cannot be read. Tell the user that it is protected.]");
-                        uiMessage = $"\n*(Jag får inte läsa {filename} - skyddad fil 🔒)*\n";
+                        injected.Add($"[ACCESS DENIED: {requested} is a protected file (secrets/credentials) and cannot be read. Tell the user that it is protected.]");
+                        uiMessage = $"\n*(Jag får inte läsa {requested} - skyddad fil 🔒)*\n";
                     }
                     else if (fullPath != null && File.Exists(fullPath))
                     {
-                        string content = File.ReadAllText(fullPath);
-                        bool truncated = content.Length > MaxReadChars;
-                        if (truncated) content = content.Substring(0, MaxReadChars);
+                        string normalized = File.ReadAllText(fullPath).Replace("\r\n", "\n");
+                        string[] allLines = normalized.Split('\n');
+                        int totalLines = allLines.Length;
 
-                        injected.Add($"[FILE: {filename}]\n```\n{content}\n```" +
-                                     (truncated ? $"\n(File truncated after {MaxReadChars} characters.)" : ""));
-                        uiMessage = $"\n*(Jag läser filen {filename}... 📖)*\n";
+                        if (ranged && rangeFrom > totalLines)
+                        {
+                            injected.Add($"[FILE: {requested}] has only {totalLines} lines, so the requested range {rangeFrom}-{rangeTo} is past the end of the file.");
+                            uiMessage = $"\n*(Jag försökte läsa {requested} rad {rangeFrom}-{rangeTo}, men filen har bara {totalLines} rader ❌)*\n";
+                        }
+                        else
+                        {
+                            string content = normalized;
+                            string header = $"[FILE: {requested} ({totalLines} lines)]";
+                            string rangeInfo = "";
+
+                            if (ranged)
+                            {
+                                int a = Math.Max(1, rangeFrom);
+                                int b = Math.Min(totalLines, Math.Min(rangeTo, a + MaxReadRangeLines - 1));
+                                content = string.Join("\n", allLines.Skip(a - 1).Take(b - a + 1));
+                                header = $"[FILE: {requested} (lines {a}-{b} of {totalLines})]";
+                                rangeInfo = $" (rad {a}-{b})";
+                            }
+
+                            bool truncated = content.Length > MaxReadChars;
+                            if (truncated) content = content.Substring(0, MaxReadChars);
+
+                            injected.Add($"{header}\n```\n{content}\n```" +
+                                         (truncated ? $"\n(Truncated after {MaxReadChars} characters. The file has {totalLines} lines - read other parts with [READ_FILE: {requested} | start-end]. To change a large file use EDIT_FILE, never rewrite it.)" : ""));
+                            uiMessage = $"\n*(Jag läser filen {requested}{rangeInfo}... 📖)*\n";
+                        }
                     }
                     else
                     {
-                        injected.Add($"[FILE NOT FOUND: {filename} does not exist in {basePath}. Tell the user, or use LIST_FILES to find the right path.]");
-                        uiMessage = $"\n*(Jag försökte läsa {filename}, men hittade den inte! ❌)*\n";
+                        injected.Add($"[FILE NOT FOUND: {requested} does not exist in {basePath}. Tell the user, or use LIST_FILES to find the right path.]");
+                        uiMessage = $"\n*(Jag försökte läsa {requested}, men hittade den inte! ❌)*\n";
                     }
                 }
 
@@ -308,6 +390,137 @@ namespace SlimeHelper
             }
 
             return text;
+        }
+
+        // --- EDIT_FILE (FIND/REPLACE på befintliga filer) ---
+
+        private static readonly Regex EditBlockRegex =
+            new(@"\[EDIT_FILE:\s*(?<path>[^\]\r\n]+?)\s*\](?<body>.*?)\[/EDIT_FILE\]", RegexOptions.Singleline);
+
+        private static readonly Regex FindReplaceRegex =
+            new(@"\[FIND\]\r?\n?(?<find>.*?)\r?\n?\[/FIND\]\s*\[REPLACE\]\r?\n?(?<replace>.*?)\r?\n?\[/REPLACE\]", RegexOptions.Singleline);
+
+        private static string ProcessEditFiles(string text, string basePath, string activeThread, SlimeBrainManager brainManager, ref string followUpPrompt)
+        {
+            var followUps = new List<string>();
+            int handled = 0;
+
+            string result = EditBlockRegex.Replace(text, m =>
+            {
+                string filename = m.Groups["path"].Value.Trim();
+
+                if (handled++ >= MaxEditBlocksPerResponse)
+                {
+                    followUps.Add($"[SYSTEM INJECTION: EDIT_FILE for {filename} was SKIPPED - only {MaxEditBlocksPerResponse} edit blocks are processed per response. Send it again.]");
+                    return $"\n*(Jag hann inte ändra {filename} den här gången.)*\n";
+                }
+
+                var edits = new List<(string Find, string Replace)>();
+                foreach (Match fr in FindReplaceRegex.Matches(m.Groups["body"].Value))
+                {
+                    edits.Add((fr.Groups["find"].Value, fr.Groups["replace"].Value));
+                }
+
+                if (edits.Count == 0)
+                {
+                    followUps.Add($"[SYSTEM INJECTION: EDIT_FILE for {filename} had no valid [FIND]...[/FIND] followed by [REPLACE]...[/REPLACE], so NOTHING was changed. Use exactly that format.]");
+                    return $"\n*(Jag försökte ändra {filename}, men formatet var fel ❌)*\n";
+                }
+
+                string rel = StripTagPrefix(basePath, filename, activeThread);
+                if (TryEditFile(basePath, rel, edits, brainManager, activeThread, out string error))
+                {
+                    return $"\n*(Jag ändrade {filename}: {edits.Count} ändring{(edits.Count == 1 ? "" : "ar")} ✏️)*\n";
+                }
+
+                followUps.Add($"[SYSTEM INJECTION: EDIT_FILE on {filename} FAILED and NOTHING was changed: {error}. Read the relevant part of the file again (READ_FILE, optionally with a line range) and retry with FIND text copied exactly from the file.]");
+                return $"\n*(Jag kunde inte ändra {filename}: {error} ❌)*\n";
+            });
+
+            if (followUps.Count > 0)
+            {
+                string combined = string.Join("\n\n", followUps);
+                followUpPrompt = string.IsNullOrEmpty(followUpPrompt) ? combined : followUpPrompt + "\n\n" + combined;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Tillämpar FIND/REPLACE på en befintlig fil. Allt eller inget: misslyckas en ändring skrivs ingenting.
+        /// Bevarar BOM och radslut (CRLF/LF), och säkerhetskopierar filen först.
+        /// </summary>
+        private static bool TryEditFile(string basePath, string relative, List<(string Find, string Replace)> edits,
+                                        SlimeBrainManager brain, string tag, out string error)
+        {
+            error = "";
+
+            string? fullPath = ResolveSafePath(basePath, relative);
+            if (fullPath == null) { error = "sökvägen ligger utanför projektet"; return false; }
+            if (!File.Exists(fullPath)) { error = "filen finns inte (nya filer skapas med WRITE_CODE)"; return false; }
+            if (IsSensitivePath(basePath, fullPath)) { error = "skyddad fil (hemligheter/nycklar)"; return false; }
+            if (IsNoWritePath(basePath, fullPath)) { error = "skyddad mapp (.git, hooks m.fl.)"; return false; }
+
+            try
+            {
+                byte[] bytes = File.ReadAllBytes(fullPath);
+                bool hasBom = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+                int skip = hasBom ? 3 : 0;
+
+                string original;
+                try
+                {
+                    original = new System.Text.UTF8Encoding(false, true).GetString(bytes, skip, bytes.Length - skip);
+                }
+                catch (System.Text.DecoderFallbackException)
+                {
+                    error = "filen är inte UTF-8 och kan inte redigeras säkert";
+                    return false;
+                }
+
+                bool crlf = original.Contains("\r\n");
+                string content = original.Replace("\r\n", "\n");
+
+                for (int i = 0; i < edits.Count; i++)
+                {
+                    string find = edits[i].Find.Replace("\r\n", "\n");
+                    string replacement = edits[i].Replace.Replace("\r\n", "\n");
+                    string label = edits.Count > 1 ? $"ändring {i + 1}: " : "";
+
+                    if (find.Length == 0) { error = label + "FIND är tom"; return false; }
+
+                    int first = content.IndexOf(find, StringComparison.Ordinal);
+                    if (first < 0)
+                    {
+                        error = label + "FIND-texten finns inte exakt så i filen (kontrollera tecken, indrag och radbrytningar)";
+                        return false;
+                    }
+                    if (content.IndexOf(find, first + 1, StringComparison.Ordinal) >= 0)
+                    {
+                        error = label + "FIND-texten finns på flera ställen - ta med fler omgivande rader så att den blir unik";
+                        return false;
+                    }
+
+                    content = content.Substring(0, first) + replacement + content.Substring(first + find.Length);
+                }
+
+                string result = crlf ? content.Replace("\n", "\r\n") : content;
+                if (result == original) { error = "ändringen skulle inte ändra något i filen"; return false; }
+
+                if (!brain.BackupFile(tag, basePath, fullPath))
+                {
+                    error = "kunde inte göra någon säkerhetskopia, så filen lämnades orörd";
+                    return false;
+                }
+
+                File.WriteAllText(fullPath, result, new System.Text.UTF8Encoding(hasBom));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
         }
 
         // --- SEARCH_FILES ---
@@ -680,8 +893,11 @@ namespace SlimeHelper
 
         /// <summary>
         /// Skriver en fil i projektet. Nekar sökvägar utanför projektet, länkar, känsliga filer och skrivförbjudna mappar.
+        /// Befintliga filer säkerhetskopieras först, och BOM och radslut bevaras. Stora befintliga filer får inte skrivas
+        /// över i sin helhet (hon ser bara första delen av dem), de ska ändras med EDIT_FILE.
         /// </summary>
-        private static bool TryWriteFile(string basePath, string relativeFilename, string content, out string error)
+        private static bool TryWriteFile(string basePath, string relativeFilename, string content,
+                                         SlimeBrainManager brain, string tag, out string error)
         {
             error = "";
 
@@ -693,8 +909,36 @@ namespace SlimeHelper
 
             try
             {
+                bool hasBom = false;
+                bool crlf = false;
+
+                if (File.Exists(fullPath))
+                {
+                    if (new FileInfo(fullPath).Length > MaxReadChars)
+                    {
+                        error = $"filen är stor (över {MaxReadChars} tecken), använd EDIT_FILE för att ändra delar av den i stället för att skriva över hela";
+                        return false;
+                    }
+
+                    byte[] head = new byte[3];
+                    using (var fs = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    {
+                        int n = fs.Read(head, 0, 3);
+                        hasBom = n == 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF;
+                    }
+                    crlf = File.ReadAllText(fullPath).Contains("\r\n");
+
+                    if (!brain.BackupFile(tag, basePath, fullPath))
+                    {
+                        error = "kunde inte göra någon säkerhetskopia, så filen lämnades orörd";
+                        return false;
+                    }
+                }
+
+                if (crlf) content = content.Replace("\r\n", "\n").Replace("\n", "\r\n");
+
                 Directory.CreateDirectory(Path.GetDirectoryName(fullPath) ?? basePath);
-                File.WriteAllText(fullPath, content);
+                File.WriteAllText(fullPath, content, new System.Text.UTF8Encoding(hasBom));
                 return true;
             }
             catch (Exception ex)

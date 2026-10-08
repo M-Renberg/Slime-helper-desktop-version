@@ -355,6 +355,49 @@ namespace SlimeHelper
             return Directory.Exists(repoDir) ? repoDir : "";
         }
 
+        /// <summary>
+        /// Sparar en säkerhetskopia av en fil i hjärnan innan Slime ändrar eller skriver över den.
+        /// Kopiorna får ändelsen .bak så att de inte hamnar i anteckningssökningen. De 50 senaste per repo sparas.
+        /// Returnerar false om kopian inte kunde skapas (då ska filen inte röras).
+        /// </summary>
+        public bool BackupFile(string tag, string basePath, string fullPath)
+        {
+            try
+            {
+                string cleanTag = tag.Replace("#", "").Trim();
+                string dir = Path.Combine(_reposFolder, cleanTag, "backups");
+                Directory.CreateDirectory(dir);
+
+                string rel = Path.GetRelativePath(basePath, fullPath).Replace('\\', '_').Replace('/', '_');
+                string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
+
+                string target;
+                int n = 0;
+                do
+                {
+                    target = Path.Combine(dir, $"{stamp}{(n == 0 ? "" : "-" + n)}_{rel}.bak");
+                    n++;
+                } while (File.Exists(target));
+
+                File.Copy(fullPath, target, false);
+
+                var old = new DirectoryInfo(dir).GetFiles("*.bak")
+                    .OrderByDescending(f => f.CreationTimeUtc)
+                    .Skip(50);
+                foreach (var f in old)
+                {
+                    try { f.Delete(); } catch { }
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to back up file: {ex.Message}");
+                return false;
+            }
+        }
+
         public SlimeMemory LoadMemory()
         {
             try
