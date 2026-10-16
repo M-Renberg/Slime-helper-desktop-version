@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -24,7 +24,6 @@ namespace SlimeHelper
     public class GeminiProvider : IAiProvider
     {
         private static readonly JsonSerializerOptions JsonIndentOptions = new() { WriteIndented = true };
-        private static readonly List<ChatMessage> _history = [];
         private static readonly string MemoryFilePath = Path.Combine(Path.GetTempPath(), "slime_memory.json");
         private static SlimeMemory _memory = new();
 
@@ -62,7 +61,7 @@ namespace SlimeHelper
             var requestBody = new
             {
                 system_instruction = new { parts = new[] { new { text = dynamicInstruction } } },
-                contents = _history.Concat([newUserMessage]).ToArray()
+                contents = new[] { newUserMessage }
             };
 
             var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
@@ -95,7 +94,6 @@ namespace SlimeHelper
 
                     if (!string.IsNullOrEmpty(aiText))
                     {
-                        AddToHistory(prompt, aiText);
                         return aiText;
                     }
                 }
@@ -131,25 +129,13 @@ namespace SlimeHelper
             catch (Exception ex) { Console.WriteLine("Save error: " + ex.Message); }
         }
 
-        private static void AddToHistory(string userPrompt, string aiResponse)
-        {
-            _history.Add(new ChatMessage { role = "user", parts = [new Part { text = userPrompt }] });
-            _history.Add(new ChatMessage { role = "model", parts = [new Part { text = aiResponse }] });
-
-            if (_history.Count > 10)
-            {
-                _history.RemoveRange(0, 2);
-            }
-        }
-
-        public static List<ChatMessage> GetHistory() => _history;
+        public static List<ChatMessage> GetHistory() => [];
     }
 
     // Claude Provider
     public class ClaudeProvider : IAiProvider
     {
         private static readonly JsonSerializerOptions JsonIndentOptions = new() { WriteIndented = true };
-        private static readonly List<ChatMessage> _history = [];
         private static readonly string MemoryFilePath = Path.Combine(Path.GetTempPath(), "slime_memory.json");
         private static SlimeMemory _memory = new();
 
@@ -184,15 +170,12 @@ namespace SlimeHelper
             var requestBody = new
             {
                 model = "claude-3-5-sonnet-20240620",
-                max_tokens = 1024,
+                max_tokens = 4096,
                 system = dynamicInstruction,
-                messages = _history.Select(h => new
+                messages = new[]
                 {
-                    role = h.role == "model" ? "assistant" : "user",
-                    content = h.parts.Count > 0 ? h.parts[0].text : ""
-                }).Concat([
                     new { role = "user", content = prompt }
-                ]).ToArray()
+                }
             };
 
             var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
@@ -219,7 +202,6 @@ namespace SlimeHelper
 
                     if (!string.IsNullOrEmpty(aiText))
                     {
-                        AddToHistory(prompt, aiText);
                         return aiText;
                     }
                 }
@@ -255,17 +237,6 @@ namespace SlimeHelper
             catch (Exception ex) { Console.WriteLine("Save error: " + ex.Message); }
         }
 
-        private static void AddToHistory(string userPrompt, string aiResponse)
-        {
-            _history.Add(new ChatMessage { role = "user", parts = [new Part { text = userPrompt }] });
-            _history.Add(new ChatMessage { role = "model", parts = [new Part { text = aiResponse }] });
-
-            if (_history.Count > 10)
-            {
-                _history.RemoveRange(0, 2);
-            }
-        }
-
-        public static List<ChatMessage> GetHistory() => _history;
+        public static List<ChatMessage> GetHistory() => [];
     }
 }

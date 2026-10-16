@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
@@ -62,9 +62,81 @@ namespace SlimeHelper
         //memoney
         private readonly SlimeBrainManager _brainManager = new();
 
+        private static readonly HashSet<string> IgnoredHashDirectives = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "#if", "#else", "#elif", "#endif", "#define", "#undef",
+            "#region", "#endregion", "#error", "#warning", "#line", "#pragma", "#nullable"
+        };
+
+        private static bool IsValidRepoHashTag(string w, string prompt)
+        {
+            if (string.IsNullOrWhiteSpace(w) || !w.StartsWith("#"))
+                return false;
+
+            // Pure '#' or markdown headers like '#', '##', '###'
+            if (w.Length <= 1 || w.All(c => c == '#'))
+                return false;
+
+            // Known C# directives (case-insensitive)
+            string cleanDirective = w.TrimEnd(';', ':', ')', '}', ']', '>', '"', '\'', '`');
+            if (IgnoredHashDirectives.Contains(w) || IgnoredHashDirectives.Contains(cleanDirective))
+                return false;
+
+            // Digits / issue numbers like #1, #2, #42
+            string tagBody = w.TrimStart('#');
+            if (string.IsNullOrEmpty(tagBody) || tagBody.All(char.IsDigit) || char.IsDigit(tagBody[0]))
+                return false;
+
+            // Code punctuation inside or at the end of the hashtag
+            // Valid repo tags consist only of letters, digits, underscores, or hyphens
+            if (tagBody.Any(c => !char.IsLetterOrDigit(c) && c != '_' && c != '-'))
+                return false;
+
+            // Check if preceded or followed by code punctuation in the prompt
+            int searchStart = 0;
+            bool foundCleanOccurrence = false;
+            while (searchStart < prompt.Length)
+            {
+                int idx = prompt.IndexOf(w, searchStart, StringComparison.Ordinal);
+                if (idx < 0) break;
+
+                bool precededByCode = false;
+                int prevIdx = idx - 1;
+                while (prevIdx >= 0 && (prompt[prevIdx] == ' ' || prompt[prevIdx] == '\t'))
+                    prevIdx--;
+
+                if (prevIdx >= 0 && "()[]{}<>;:=+*/\\\"'`~^&|%$#".Contains(prompt[prevIdx]))
+                    precededByCode = true;
+
+                bool followedByCode = false;
+                int nextIdx = idx + w.Length;
+                while (nextIdx < prompt.Length && (prompt[nextIdx] == ' ' || prompt[nextIdx] == '\t'))
+                    nextIdx++;
+
+                if (nextIdx < prompt.Length && "()[]{}<>;:=+*/\\\"'`~^&|%$".Contains(prompt[nextIdx]))
+                    followedByCode = true;
+
+                if (!precededByCode && !followedByCode)
+                {
+                    foundCleanOccurrence = true;
+                    break;
+                }
+
+                searchStart = idx + w.Length;
+            }
+
+            return foundCleanOccurrence;
+        }
+
         public MainWindow()
         {
             InitializeComponent();
+
+            // Bekräftelsedialog innan Slime får köra bygge/test/lint i ett repo (visas på UI-tråden)
+            SlimeToolManager.ConfirmRun = (title, message) =>
+                System.Windows.MessageBox.Show(this, message, title,
+                    System.Windows.MessageBoxButton.YesNo,
+                    System.Windows.MessageBoxImage.Question) == System.Windows.MessageBoxResult.Yes;
 
             DependencyPropertyDescriptor
                 .FromProperty(TextBlock.TextProperty, typeof(TextBlock))
@@ -860,35 +932,56 @@ namespace SlimeHelper
                 }
                 else
                 {
-                    // Explicit #tagg som inte är bunden -> tydligt besked i stället för påhittade verktyg
-                    var firstTag = words.FirstOrDefault(w => w.StartsWith("#"));
-                    if (firstTag != null)
+                    void UseCwdRepo((string Tag, string Path) repo)
                     {
-                        SpeechText.Text = $"Jag har inget repo bundet till {firstTag.ToLowerInvariant()}. Gå till repots mapp och kör: slime bind {firstTag.TrimStart('#')}";
-                        WriteCliResponse(cliRequestId, SpeechText.Text, true);
-                        ShowSlimeReaction("UNSURE", "");
-                        StartInteractionTimer(8);
-                        return;
-                    }
+                        boundRepos.Add((repo.Tag, repo.Path));
+                        boundPaths.Add(repo.Path);
+                        targetRepoPath = repo.Path;
+                        activeThread = repo.Tag;
 
-                    // Ingen tagg i prompten: står CLI:t i ett bundet repo (eller en undermapp) använder vi det
-                    var cwdRepo = _brainManager.FindBoundRepoForDirectory(workingDir);
-                    if (cwdRepo != null)
-                    {
-                        boundRepos.Add((cwdRepo.Value.Tag, cwdRepo.Value.Path));
-                        boundPaths.Add(cwdRepo.Value.Path);
-                        targetRepoPath = cwdRepo.Value.Path;
-                        activeThread = cwdRepo.Value.Tag;
-
-                        string relCwd = Path.GetRelativePath(cwdRepo.Value.Path, workingDir!).Replace('\\', '/');
+                        string relCwd = Path.GetRelativePath(repo.Path, workingDir!).Replace('\\', '/');
                         if (relCwd == ".")
                         {
-                            cwdHint = $"[CLI Location] The user's terminal is in the ROOT of the bound workspace '{cwdRepo.Value.Tag}' ({cwdRepo.Value.Path}).";
+                            cwdHint = $"[CLI Location] The user's terminal is in the ROOT of the bound workspace '{repo.Tag}' ({repo.Path}).";
                         }
                         else
                         {
-                            cwdHint = $"[CLI Location] The user's terminal is in the subfolder '{relCwd}' of the bound workspace '{cwdRepo.Value.Tag}' ({cwdRepo.Value.Path}). " +
+                            cwdHint = $"[CLI Location] The user's terminal is in the subfolder '{relCwd}' of the bound workspace '{repo.Tag}' ({repo.Path}). " +
                                       $"Relative file names the user mentions most likely refer to that folder (try '{relCwd}/<name>' first).";
+                        }
+                    }
+
+                    var firstHashTag = words.FirstOrDefault(w => IsValidRepoHashTag(w, prompt));
+                    var firstAtTag = words.FirstOrDefault(w => w.StartsWith("@")); // NYTT: Leta efter ämnen!
+
+                    if (firstHashTag != null)
+                    {
+                        var cwdRepo = _brainManager.FindBoundRepoForDirectory(workingDir);
+                        if (cwdRepo != null)
+                        {
+                            UseCwdRepo(cwdRepo.Value);
+                        }
+                        else
+                        {
+                            SpeechText.Text = $"I have no repo bound to {firstHashTag.ToLowerInvariant()}. Go to the repo's folder and run: slime bind {firstHashTag.TrimStart('#')}";
+                            WriteCliResponse(cliRequestId, SpeechText.Text, true);
+                            ShowSlimeReaction("UNSURE", "");
+                            StartInteractionTimer(8);
+                            return;
+                        }
+                    }
+                    else if (firstAtTag != null)
+                    {
+                        // Ämne/Subject upptäckt! (t.ex. @antigravity)
+                        activeThread = firstAtTag.ToLowerInvariant();
+                    }
+                    else
+                    {
+                        // Ingen tagg i prompten: står CLI:t i ett bundet repo (eller en undermapp) använder vi det
+                        var cwdRepo = _brainManager.FindBoundRepoForDirectory(workingDir);
+                        if (cwdRepo != null)
+                        {
+                            UseCwdRepo(cwdRepo.Value);
                         }
                     }
                 }
@@ -983,26 +1076,50 @@ namespace SlimeHelper
                 string fullQuery = queryBuilder.ToString();
 
                 // Skicka till AI
+                // Nollställ räknaren av verkligt skrivna ändringar, så att vi kan jämföra med vad hon påstår
+                SlimeToolManager.ResetModificationCount();
+
                 // 1. Första AI-anropet
                 response = await AiService.AskSlime(fullQuery, provider, apiKey);
                 response = SlimeToolManager.StripHallucinatedTurns(response);
 
                 // 2. Kolla om hon använde verktyg (t.ex. [READ_FILE])
                 string followUpPrompt;
-                string cleanResponse = SlimeToolManager.ProcessResponse(response, activeThread, targetRepoPath, _brainManager, out followUpPrompt);
+                string cleanResponse = SlimeToolManager.ProcessResponse(response, activeThread, targetRepoPath, _brainManager, out followUpPrompt, out var pendingChecks);
 
                 // Spara första steget i historiken
                 _brainManager.SaveMessage(activeThread, "User", prompt);
-                _brainManager.SaveMessage(activeThread, "Slime", SlimeToolManager.CompactForHistory(response));
+                _brainManager.SaveMessage(activeThread, "Slime", cleanResponse);
+
+                // Om hon bad om bygge/test/lint: kör det asynkront och skicka tillbaka resultatet till henne
+                if (pendingChecks.Count > 0)
+                {
+                    SpeechText.Text = cleanResponse; // visar t.ex. "I'm running the build check... 🔨"
+                    followUpPrompt = await SlimeToolManager.RunCheckRequestsAsync(pendingChecks, targetRepoPath, activeThread, followUpPrompt);
+                }
 
                 // 3. AGENT-LOOP: Om hon bad om att få läsa en fil, skicka tillbaka filinnehållet till henne i smyg!
                 var agentLog = new System.Text.StringBuilder();
                 int rounds = 0;
-                const int maxRounds = 4;
+                const int maxRounds = 8; // lista -> läsa -> ändra -> bygga -> rätta ...
 
-                while (!string.IsNullOrEmpty(followUpPrompt) && rounds++ < maxRounds)
+                // Påstår hon en ändring som appen aldrig skrev? Då får hon en rättelse och en chans att göra det på riktigt (en gång per fråga).
+                int correctionsLeft = 1;
+                bool NeedsFollowUp()
                 {
-                    SpeechText.Text = cleanResponse; // UI:t visar t.ex. "Jag läser filen..."
+                    if (!string.IsNullOrEmpty(followUpPrompt)) return true;
+                    if (SlimeToolManager.ShouldCorrectFalseClaim(cleanResponse, activeThread, correctionsLeft, prompt))
+                    {
+                        correctionsLeft--;
+                        followUpPrompt = SlimeToolManager.CorrectionFor(cleanResponse, prompt);
+                        return true;
+                    }
+                    return false;
+                }
+
+                while (NeedsFollowUp() && rounds++ < maxRounds)
+                {
+                    SpeechText.Text = cleanResponse; // the UI shows e.g. "I'm reading the file..."
 
                     // Spara bara en kort markör i historiken, annars hamnar hela filinnehåll i chat_history.json
                     string shortNote = followUpPrompt.Length > 400
@@ -1030,9 +1147,17 @@ namespace SlimeHelper
                     loopBuilder.AppendLine(agentLog.ToString());
 
                     loopBuilder.AppendLine("[Instructions]");
-                    loopBuilder.AppendLine("The tool results above are the data you asked for. Answer the original user request NOW, based on them. " +
-                                           "Show the user the actual information (for example the file names or the file content) in your reply - do not just say that you looked. " +
-                                           "Do not call a tool again for something already in the results above. Only use another tool if you still need information that is not there.");
+                    if (SlimeToolManager.IsChangeRequest(prompt))
+                    {
+                        loopBuilder.AppendLine("The tool results above contain the file contents or information you requested. The user asked for a CHANGE to files or code: you MUST now output the required tool block ([EDIT_FILE] with [FIND] and [REPLACE], or [WRITE_CODE] for a new file) to apply the change. Do NOT merely describe the change in text or output bare markdown code blocks - you MUST execute it using the tool block. After editing, verify your work with [RUN_CHECK: build] if relevant.");
+                    }
+                    else
+                    {
+                        loopBuilder.AppendLine("The tool results above are the data you asked for. Answer the original user request NOW, based on them. " +
+                                               "Show the user the actual information (for example the file names or the file content) in your reply - do not just say that you looked. " +
+                                               "Do not call a tool again for something already in the results above. Only use another tool if you still need information that is not there. " +
+                                               "The user only sees your FINAL reply, never the earlier steps, so do not mention earlier attempts or errors you already fixed, and do not apologise for them. Just say what is true now.");
+                    }
 
                     string loopQuery = loopBuilder.ToString();
 
@@ -1040,14 +1165,32 @@ namespace SlimeHelper
                     response = SlimeToolManager.StripHallucinatedTurns(response);
 
                     // Processa nya verktyg i svaret; en ny uppföljning startar nästa runda
-                    cleanResponse = SlimeToolManager.ProcessResponse(response, activeThread, targetRepoPath, _brainManager, out followUpPrompt);
+                    cleanResponse = SlimeToolManager.ProcessResponse(response, activeThread, targetRepoPath, _brainManager, out followUpPrompt, out pendingChecks);
 
-                    _brainManager.SaveMessage(activeThread, "Slime", SlimeToolManager.CompactForHistory(response));
+                    _brainManager.SaveMessage(activeThread, "Slime", cleanResponse);
+
+                    if (pendingChecks.Count > 0)
+                    {
+                        SpeechText.Text = cleanResponse;
+                        followUpPrompt = await SlimeToolManager.RunCheckRequestsAsync(pendingChecks, targetRepoPath, activeThread, followUpPrompt);
+                    }
+                }
+
+                // 3b. Om hon fortfarande påstår något som aldrig skrevs: säg det rakt ut, och låt henne veta det i historiken
+                // Till CLI:t: hela händelsekedjan (läste, ändrade, byggde, resultat) följt av hennes svar
+                string cliText = SlimeToolManager.ComposeCliText(cleanResponse);
+
+                string? warning = SlimeToolManager.WarningFor(cleanResponse, prompt, activeThread);
+                if (warning != null)
+                {
+                    _brainManager.SaveMessage(activeThread, "System", SlimeToolManager.NoteFor(cleanResponse, prompt));
+                    cleanResponse += "\n\n" + warning;
+                    cliText += "\n\n" + warning;
                 }
 
                 // 4. Visa det slutgiltiga resultatet i appen
                 SpeechText.Text = cleanResponse;
-                WriteCliResponse(cliRequestId, cleanResponse);
+                WriteCliResponse(cliRequestId, cliText);
                 ShowSlimeReaction("IDLE", "");
                 PlaySounds("Idle.wav");
             }
@@ -1554,7 +1697,7 @@ namespace SlimeHelper
                             }
                             else
                             {
-                                WriteCliResponse(requestId, "Bind failed: ogiltigt kommando.", true);
+                                WriteCliResponse(requestId, "Bind failed: invalid command.", true);
                             }
                         }
                         else if (!string.IsNullOrEmpty(prompt))

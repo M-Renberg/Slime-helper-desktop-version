@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SlimeHelper.Checks</RootNamespace>
+  </PropertyGroup>
+
+  <!-- The very same source files the app uses, but without WPF. Change them in SlimeHelper and the checks see it. -->
+  <ItemGroup>
+    <Compile Include="..\SlimeHelper\SlimeToolManager.cs" Link="App\SlimeToolManager.cs" />
+    <Compile Include="..\SlimeHelper\SlimeBrainManager.cs" Link="App\SlimeBrainManager.cs" />
+    <Compile Include="..\SlimeHelper\SlimeMemory.cs" Link="App\SlimeMemory.cs" />
+  </ItemGroup>
+
+</Project>

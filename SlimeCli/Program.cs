@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.Json;
 
 namespace SlimeCli
@@ -389,7 +389,7 @@ namespace SlimeCli
             if (!pickedUp)
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("⚠ Slime svarar inte - är SlimeHelper-appen igång?");
+                Console.WriteLine("⚠ Slime isn't responding - is the SlimeHelper app running?");
                 Console.ResetColor();
                 return;
             }
@@ -397,12 +397,12 @@ namespace SlimeCli
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine("🟢 Slime received command...");
             Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.Write("Slime tänker... 0s");
+            Console.Write("Slime is thinking... 0s");
 
             // 2) Vänta på svaret (kan ta en stund, agent-loopen gör flera AI-anrop)
             string responsePath = ResponseFilePath(requestId);
             var started = DateTime.UtcNow;
-            var deadline = started.AddSeconds(180);
+            var deadline = started.AddSeconds(600); // a build, an approval dialog and fix rounds can take a while
             int lastShown = 0;
 
             while (DateTime.UtcNow < deadline)
@@ -411,7 +411,7 @@ namespace SlimeCli
                 if (secs != lastShown)
                 {
                     lastShown = secs;
-                    Console.Write($"\rSlime tänker... {secs}s");
+                    Console.Write($"\rSlime is thinking... {secs}s");
                 }
 
                 if (File.Exists(responsePath))
@@ -444,8 +444,8 @@ namespace SlimeCli
 
             ClearThinkingLine();
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("⚠ Inget svar inom 3 minuter. Svaret kan fortfarande dyka upp i Slimes pratbubbla.");
-            Console.WriteLine($"  (CLI:t väntade på filen: {responsePath})");
+            Console.WriteLine("⚠ No reply within 10 minutes. The answer may still show up in Slime's speech bubble.");
+            Console.WriteLine($"  (the CLI was waiting for the file: {responsePath})");
             Console.ResetColor();
         }
 
@@ -541,7 +541,9 @@ namespace SlimeCli
                 string provider = settings.TryGetProperty("SelectedProvider", out var provProp) ? provProp.GetString() ?? "Gemini" : "Gemini";
                 string key = "";
 
-                if (provider == "Claude" && settings.TryGetProperty("ClaudeKey", out var cProp))
+                bool isClaude = string.Equals(provider, "Claude", StringComparison.OrdinalIgnoreCase);
+
+                if (isClaude && settings.TryGetProperty("ClaudeKey", out var cProp))
                 {
                     key = cProp.GetString() ?? "";
                 }
@@ -556,28 +558,67 @@ namespace SlimeCli
                 }
 
                 using var client = new HttpClient();
-                string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}";
-                var body = new { contents = new[] { new { parts = new[] { new { text = prompt } } } } };
-                var response = await client.PostAsync(url, new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
 
-                string json = await response.Content.ReadAsStringAsync();
-                using var doc = JsonDocument.Parse(json);
-
-                if (doc.RootElement.TryGetProperty("candidates", out var candidates) && candidates.GetArrayLength() > 0)
+                if (isClaude)
                 {
-                    return candidates[0]
-                           .GetProperty("content")
-                           .GetProperty("parts")[0]
-                           .GetProperty("text")
-                           .GetString() ?? "";
-                }
+                    string url = "https://api.anthropic.com/v1/messages";
+                    client.DefaultRequestHeaders.Add("x-api-key", key);
+                    client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
 
-                if (doc.RootElement.TryGetProperty("error", out var errorProp))
+                    var body = new
+                    {
+                        model = "claude-3-5-sonnet-20240620",
+                        max_tokens = 4096,
+                        messages = new[]
+                        {
+                            new { role = "user", content = prompt }
+                        }
+                    };
+
+                    var response = await client.PostAsync(url, new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
+                    string json = await response.Content.ReadAsStringAsync();
+                    using var doc = JsonDocument.Parse(json);
+
+                    if (doc.RootElement.TryGetProperty("error", out var errorProp))
+                    {
+                        string msg = errorProp.TryGetProperty("message", out var m) ? m.GetString() ?? "Unknown error" : "Unknown error";
+                        return $"API Error: {msg}";
+                    }
+
+                    if (doc.RootElement.TryGetProperty("content", out var contentArray) && contentArray.GetArrayLength() > 0)
+                    {
+                        return contentArray[0]
+                               .GetProperty("text")
+                               .GetString() ?? "";
+                    }
+
+                    return "Error: No response generated by AI.";
+                }
+                else
                 {
-                    return $"API Error: {errorProp.GetProperty("message").GetString()}";
-                }
+                    string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}";
+                    var body = new { contents = new[] { new { parts = new[] { new { text = prompt } } } } };
+                    var response = await client.PostAsync(url, new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
 
-                return "Error: No response generated by AI.";
+                    string json = await response.Content.ReadAsStringAsync();
+                    using var doc = JsonDocument.Parse(json);
+
+                    if (doc.RootElement.TryGetProperty("candidates", out var candidates) && candidates.GetArrayLength() > 0)
+                    {
+                        return candidates[0]
+                               .GetProperty("content")
+                               .GetProperty("parts")[0]
+                               .GetProperty("text")
+                               .GetString() ?? "";
+                    }
+
+                    if (doc.RootElement.TryGetProperty("error", out var errorProp))
+                    {
+                        return $"API Error: {errorProp.GetProperty("message").GetString()}";
+                    }
+
+                    return "Error: No response generated by AI.";
+                }
             }
             catch (Exception ex)
             {

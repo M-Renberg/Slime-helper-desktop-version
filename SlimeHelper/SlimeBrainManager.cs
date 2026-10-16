@@ -15,6 +15,7 @@ namespace SlimeHelper
         private string _userFolder = "";
         private string _reposFolder = "";
         private string _memoryFolder = "";
+        private string _subjectsFolder = ""; // FIX 1: Lade till variabeln här!
         private string _profilePath = "";
         private string _historyPath = "";
 
@@ -31,22 +32,31 @@ namespace SlimeHelper
 
         private string RepoMapPath => Path.Combine(_reposFolder, "repo_map.json");
 
-        public SlimeBrainManager()
+        // Används av testerna (SlimeHelper.Checks): lägger hela hjärnan i en egen mapp så att
+        // tester aldrig rör den riktiga hjärnan eller Obsidian-valvet.
+        private readonly string? _brainRootOverride;
+
+        public SlimeBrainManager(string? brainRootOverride = null)
         {
-            string settingsPath = Path.Combine(Path.GetTempPath(), "slime_settings.json");
+            _brainRootOverride = brainRootOverride;
+
             string obsidianPath = "";
-            try
+            if (_brainRootOverride == null)
             {
-                if (File.Exists(settingsPath))
+                string settingsPath = Path.Combine(Path.GetTempPath(), "slime_settings.json");
+                try
                 {
-                    var jsonDoc = JsonDocument.Parse(File.ReadAllText(settingsPath));
-                    if (jsonDoc.RootElement.TryGetProperty("ObsidianVaultPath", out var obsProp))
+                    if (File.Exists(settingsPath))
                     {
-                        obsidianPath = obsProp.GetString() ?? "";
+                        var jsonDoc = JsonDocument.Parse(File.ReadAllText(settingsPath));
+                        if (jsonDoc.RootElement.TryGetProperty("ObsidianVaultPath", out var obsProp))
+                        {
+                            obsidianPath = obsProp.GetString() ?? "";
+                        }
                     }
                 }
+                catch { }
             }
-            catch { }
 
             SetupPaths(obsidianPath);
             InitializeBrain();
@@ -76,7 +86,11 @@ namespace SlimeHelper
 
         private void SetupPaths(string obsidianVaultPath)
         {
-            if (!string.IsNullOrWhiteSpace(obsidianVaultPath) && Directory.Exists(obsidianVaultPath))
+            if (_brainRootOverride != null)
+            {
+                _brainRootPath = _brainRootOverride;
+            }
+            else if (!string.IsNullOrWhiteSpace(obsidianVaultPath) && Directory.Exists(obsidianVaultPath))
             {
                 _brainRootPath = Path.Combine(obsidianVaultPath, "SlimeBrain");
             }
@@ -89,6 +103,7 @@ namespace SlimeHelper
             _userFolder = Path.Combine(_brainRootPath, "user");
             _reposFolder = Path.Combine(_brainRootPath, "repos");
             _memoryFolder = Path.Combine(_brainRootPath, "memory");
+            _subjectsFolder = Path.Combine(_brainRootPath, "Subjects");
 
             _profilePath = Path.Combine(_userFolder, "profile.json");
             _historyPath = Path.Combine(_memoryFolder, "chat_history.json");
@@ -99,6 +114,7 @@ namespace SlimeHelper
             Directory.CreateDirectory(_userFolder);
             Directory.CreateDirectory(_reposFolder);
             Directory.CreateDirectory(_memoryFolder);
+            Directory.CreateDirectory(_subjectsFolder);
 
             if (!File.Exists(RepoMapPath))
             {
@@ -134,6 +150,13 @@ namespace SlimeHelper
         {
             try
             {
+                // Appens statusrader ("I edited X ✏️") sparas aldrig i hennes historik, annars härmar hon dem
+                if (role == "Slime")
+                {
+                    content = SlimeToolManager.RemoveStatusLines(content);
+                    if (string.IsNullOrWhiteSpace(content)) return;
+                }
+
                 if (!_chatHistory.ContainsKey(threadId))
                 {
                     _chatHistory[threadId] = new List<SlimeMemoryMessage>();
@@ -164,7 +187,11 @@ namespace SlimeHelper
 
             foreach (var msg in messages)
             {
-                sb.AppendLine($"{msg.Role}: {msg.Content}");
+                // Städar även gammal historik som redan innehåller statusrader
+                string text = msg.Role == "Slime" ? SlimeToolManager.RemoveStatusLines(msg.Content) : msg.Content;
+                if (string.IsNullOrWhiteSpace(text)) continue;
+
+                sb.AppendLine($"{msg.Role}: {text}");
             }
             return sb.ToString().Trim();
         }
@@ -318,41 +345,70 @@ namespace SlimeHelper
             }
         }
 
-        public void SaveRepoNote(string tag, string filename, string content)
+        // FIX 2: Hanterar @Subjects, General, repos OCH undermappar!
+        // Returnerar true bara om anteckningen faktiskt sparades (så att appen inte påstår något falskt)
+        public bool SaveRepoNote(string tag, string filename, string content)
         {
             try
             {
-                string cleanFolderName = tag.Replace("#", "").Trim();
-                string repoDir = Path.Combine(_reposFolder, cleanFolderName);
-
-                if (!Directory.Exists(repoDir))
+                string baseDir;
+                if (tag.StartsWith("@"))
                 {
-                    Directory.CreateDirectory(repoDir);
+                    // Ämnen/Subjects hamnar i "Subjects/ämnetsnamn/"
+                    string cleanSubject = tag.Replace("@", "").Trim();
+                    baseDir = Path.Combine(_subjectsFolder, cleanSubject);
+                }
+                else if (tag.Equals("General", StringComparison.OrdinalIgnoreCase))
+                {
+                    baseDir = Path.Combine(_brainRootPath, "Notes");
+                }
+                else
+                {
+                    string cleanFolderName = tag.Replace("#", "").Trim();
+                    baseDir = Path.Combine(_reposFolder, cleanFolderName);
                 }
 
-                if (!filename.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+                // Tillåt AI:n att skapa undermappar via filnamnet (t.ex. "settings/info.md")
+                string cleanRelativePath = filename.Replace('\\', '/').TrimStart('/');
+                string fullPath = Path.GetFullPath(Path.Combine(baseDir, cleanRelativePath));
+
+                // Säkerhet: Hoppa inte ur minnesmappen med ../
+                // Jämförs med avslutande snedstreck, annars släpps syskonmappar med samma namnbörjan igenom ("pr" -> "pr2").
+                string baseFull = Path.GetFullPath(baseDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                                  + Path.DirectorySeparatorChar;
+                if (!fullPath.StartsWith(baseFull, StringComparison.OrdinalIgnoreCase)) return false;
+
+                if (!fullPath.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
                 {
-                    filename += ".md";
+                    fullPath += ".md";
                 }
 
-                foreach (var c in Path.GetInvalidFileNameChars())
-                {
-                    filename = filename.Replace(c.ToString(), "");
-                }
-
-                File.WriteAllText(Path.Combine(repoDir, filename), content.Trim());
+                Directory.CreateDirectory(Path.GetDirectoryName(fullPath) ?? baseDir);
+                File.WriteAllText(fullPath, content.Trim());
+                return true;
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Failed to save repo note: {ex.Message}");
+                return false;
             }
         }
 
+        // FIX 3: Hämtar rätt hjärn-sökväg beroende på om det är ett @Subject eller #Repo
         public string GetRepoBrainPath(string tag)
         {
-            string cleanFolderName = tag.Replace("#", "").Trim();
-            string repoDir = Path.Combine(_reposFolder, cleanFolderName);
-            return Directory.Exists(repoDir) ? repoDir : "";
+            string dir = "";
+            if (tag.StartsWith("@"))
+            {
+                string cleanSubject = tag.Replace("@", "").Trim();
+                dir = Path.Combine(_subjectsFolder, cleanSubject);
+            }
+            else
+            {
+                string cleanFolderName = tag.Replace("#", "").Trim();
+                dir = Path.Combine(_reposFolder, cleanFolderName);
+            }
+            return Directory.Exists(dir) ? dir : "";
         }
 
         /// <summary>
