@@ -1147,9 +1147,31 @@ namespace SlimeHelper
                     loopBuilder.AppendLine(agentLog.ToString());
 
                     loopBuilder.AppendLine("[Instructions]");
-                    if (SlimeToolManager.IsChangeRequest(prompt))
+                    if (SlimeToolManager.WriteFailureCount >= 3)
                     {
-                        loopBuilder.AppendLine("The tool results above contain the file contents or information you requested. The user asked for a CHANGE to files or code: you MUST now output the required tool block ([EDIT_FILE] with [FIND] and [REPLACE], or [WRITE_CODE] for a new file) to apply the change. Do NOT merely describe the change in text or output bare markdown code blocks - you MUST execute it using the tool block. After editing, verify your work with [RUN_CHECK: build] if relevant.");
+                        // Multiple edit failures occurred: instruct the model to stop retrying and report the issue to the user
+                        loopBuilder.AppendLine("You have attempted to edit this file multiple times and the tool reported errors. Stop attempting [EDIT_FILE]. " +
+                                               "Explain to the user what you were trying to change and what specific error occurred so they can assist.");
+                    }
+                    else if (SlimeToolManager.ModificationCount > 0)
+                    {
+                        // File has already been modified on disk during this request
+                        bool hasCheckFailure = followUpPrompt.Contains("FAILED") || agentLog.ToString().Contains("FAILED");
+                        if (hasCheckFailure)
+                        {
+                            loopBuilder.AppendLine("A previous build check FAILED with compiler errors shown in the tool results above. Read the error messages carefully and use [EDIT_FILE] to FIX the error. " +
+                                                   "Do NOT duplicate or re-insert methods that are already present in the file; only repair the compilation error. After fixing, verify again with [RUN_CHECK: build].");
+                        }
+                        else
+                        {
+                            loopBuilder.AppendLine("The requested change has ALREADY been successfully written to disk and verified. Do NOT output [EDIT_FILE] or [WRITE_CODE] again to repeat the change. " +
+                                                   "Provide your final response to the user now, briefly summarizing what you did and confirming that the build succeeded.");
+                        }
+                    }
+                    else if (SlimeToolManager.IsChangeRequest(prompt))
+                    {
+                        // Change requested but nothing has been written to disk yet (e.g. Slime only read the file)
+                        loopBuilder.AppendLine("The tool results above contain the file contents or information you requested. You have NOT yet applied the requested change to disk: you MUST now output the required tool block ([EDIT_FILE] with [FIND] and [REPLACE], or [WRITE_CODE] for a new file) to apply the change. Do NOT merely describe the change in text or output bare markdown code blocks - you MUST execute it using the tool block. After editing, verify your work with [RUN_CHECK: build] if relevant.");
                     }
                     else
                     {

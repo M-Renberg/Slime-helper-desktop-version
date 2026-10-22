@@ -1,4 +1,4 @@
-﻿namespace SlimeHelper
+namespace SlimeHelper
 {
     public class SlimeMemory
     {
