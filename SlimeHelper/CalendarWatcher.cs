@@ -39,22 +39,66 @@ namespace SlimeHelper
                     ApplicationName = ApplicationName,
                 });
 
-                // Hämta händelser från primära kalendern från och med nu
-                EventsResource.ListRequest request = service.Events.List("primary");
-                request.TimeMinDateTimeOffset = DateTime.Now;
-                request.ShowDeleted = false;
-                request.SingleEvents = true;
-                request.OrderBy = EventsResource.ListRequest.OrderByEnum.StartTime;
-                request.MaxResults = 1;
+                // 1. Hämta en lista över ALLA kalendrar användaren har tillgång till
+                var calendarList = await service.CalendarList.List().ExecuteAsync();
 
-                Events events = await request.ExecuteAsync();
-                var items = events.Items;
+                Event? closestEvent = null;
+                DateTimeOffset closestTime = DateTimeOffset.MaxValue;
 
-                if (items != null && items.Count > 0)
+                // 2. Loopa igenom varje kalender (privat, jobb, delade)
+                foreach (var calendar in calendarList.Items)
                 {
-                    var nextEvent = items[0];
-                    string when = nextEvent.Start.DateTimeDateTimeOffset?.ToString("HH:mm") ?? nextEvent.Start.Date;
-                    return $"{nextEvent.Summary} kl {when}";
+                    try
+                    {
+                        EventsResource.ListRequest request = service.Events.List(calendar.Id);
+                        request.TimeMinDateTimeOffset = DateTimeOffset.Now;
+                        request.ShowDeleted = false;
+                        request.SingleEvents = true;
+                        request.OrderBy = EventsResource.ListRequest.OrderByEnum.StartTime;
+                        request.MaxResults = 1;
+
+                        Events events = await request.ExecuteAsync();
+                        var items = events.Items;
+
+                        if (items != null && items.Count > 0)
+                        {
+                            var nextEvent = items[0];
+                            DateTimeOffset eventTime;
+
+                            // Hantera både tidsbestämda möten och heldagsevents
+                            if (nextEvent.Start.DateTimeDateTimeOffset.HasValue)
+                            {
+                                eventTime = nextEvent.Start.DateTimeDateTimeOffset.Value;
+                            }
+                            else if (DateTime.TryParse(nextEvent.Start.Date, out DateTime parsedDate))
+                            {
+                                eventTime = new DateTimeOffset(parsedDate);
+                            }
+                            else
+                            {
+                                continue;
+                            }
+
+                            // Spara mötet om det ligger närmare i tiden än det vi hittills hittat
+                            if (eventTime < closestTime)
+                            {
+                                closestTime = eventTime;
+                                closestEvent = nextEvent;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Ignorera specifika kalendrar om vi saknar läsrättigheter till just dem
+                        continue;
+                    }
+                }
+
+                // 3. Returnera det absolut närmaste mötet från alla kalendrar
+                if (closestEvent != null)
+                {
+                    string when = closestEvent.Start.DateTimeDateTimeOffset?.ToString("HH:mm") ?? closestEvent.Start.Date;
+                    return $"{closestEvent.Summary} kl {when}";
                 }
             }
             catch (Exception ex)
@@ -108,6 +152,7 @@ namespace SlimeHelper
                     }
                 };
 
+                // Lägger till nya events i huvudkalendern
                 EventsResource.InsertRequest request = service.Events.Insert(newEvent, "primary");
                 await request.ExecuteAsync();
                 return true;
@@ -174,15 +219,15 @@ namespace SlimeHelper
             else
             {
                 var daysMap = new Dictionary<string, DayOfWeek>
-        {
-            { "måndag", DayOfWeek.Monday }, { "monday", DayOfWeek.Monday },
-            { "tisdag", DayOfWeek.Tuesday }, { "tuesday", DayOfWeek.Tuesday },
-            { "onsdag", DayOfWeek.Wednesday }, { "wednesday", DayOfWeek.Wednesday },
-            { "torsdag", DayOfWeek.Thursday }, { "thursday", DayOfWeek.Thursday },
-            { "fredag", DayOfWeek.Friday }, { "friday", DayOfWeek.Friday },
-            { "lördag", DayOfWeek.Saturday }, { "saturday", DayOfWeek.Saturday },
-            { "söndag", DayOfWeek.Sunday }, { "sunday", DayOfWeek.Sunday }
-        };
+                {
+                    { "måndag", DayOfWeek.Monday }, { "monday", DayOfWeek.Monday },
+                    { "tisdag", DayOfWeek.Tuesday }, { "tuesday", DayOfWeek.Tuesday },
+                    { "onsdag", DayOfWeek.Wednesday }, { "wednesday", DayOfWeek.Wednesday },
+                    { "torsdag", DayOfWeek.Thursday }, { "thursday", DayOfWeek.Thursday },
+                    { "fredag", DayOfWeek.Friday }, { "friday", DayOfWeek.Friday },
+                    { "lördag", DayOfWeek.Saturday }, { "saturday", DayOfWeek.Saturday },
+                    { "söndag", DayOfWeek.Sunday }, { "sunday", DayOfWeek.Sunday }
+                };
 
                 foreach (var pair in daysMap)
                 {
