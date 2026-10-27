@@ -307,6 +307,13 @@ namespace SlimeHelper.Checks
             Tool(unbalanced, tag, root, brain, out var f3, out _);
             Check(f3.Contains("unbalance the curly braces"), "unbalanced braces are rejected (the SlimeMemory.cs failure)", f3);
             Check(!File.ReadAllText(Path.Combine(root, "src", "Calc.cs")).Contains("X()"), "the file is untouched after the brace rejection");
+            string outside = "[EDIT_FILE: src/Calc.cs]\n[FIND]\n    }\n}\n[/FIND]\n[REPLACE]\n    }\n\n    public int Out() { return 1; }\n}\n[/REPLACE]\n[/EDIT_FILE]";
+            Tool(outside, tag, root, brain, out var fOut, out _);
+            Check(fOut.Contains("outside of any class or struct"), "placing method outside class is rejected (CS1519 prevention)", fOut);
+            Check(!File.ReadAllText(Path.Combine(root, "src", "Calc.cs")).Contains("Out()"), "the file is untouched after placing method outside class");
+            Check(SlimeToolManager.CheckCSharpMethodPlacement("namespace Demo;\npublic class C {}\npublic void Bad() {}") != null, "file-scoped namespace bad method detected");
+            Check(SlimeToolManager.CheckCSharpMethodPlacement("namespace Demo;\npublic class C {\npublic void Good() {}\n}") == null, "file-scoped namespace valid method allowed");
+            Check(SlimeToolManager.CheckCSharpMethodPlacement("namespace Demo\n{\npublic class C {}\npublic int X = 1;\n}") != null, "bad field outside class detected");
             Tool("[EDIT_FILE: src/Calc.cs]\n[FIND]\nnot in the file\n[/FIND]\n[REPLACE]\nx\n[/REPLACE]\n[/EDIT_FILE]", tag, root, brain, out var f4, out _);
             Check(f4.Contains("does not match the file exactly"), "a FIND that is not in the file is rejected", f4);
             Tool("[EDIT_FILE: src/Calc.cs]\n[FIND]\nint\n[/FIND]\n[REPLACE]\nlong\n[/REPLACE]\n[/EDIT_FILE]", tag, root, brain, out var f5, out _);
@@ -478,6 +485,7 @@ namespace SlimeHelper.Checks
             string res = await SlimeToolManager.RunCheckRequestsAsync(checks, repo, tag, "");
             Check(prompts == 1 && lastPrompt.Contains("dotnet build App/App.csproj"), "the user is asked once, with the exact command", lastPrompt);
             Check(res.Contains("FAILED") && res.Contains("error CS1002"), "a failing build is reported with the compiler error", Short(res, 700));
+            Check(res.Contains("Current file content on disk for App/Program.cs"), "failing build includes file content on disk", Short(res, 700));
             Check(res.Contains("Never claim that the code builds"), "the result tells her not to claim success");
 
             // fix and rebuild: trusted, so no new prompt

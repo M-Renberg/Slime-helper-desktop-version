@@ -416,6 +416,7 @@ namespace SlimeHelper
                 sb.AppendLine("- FIND must match the file EXACTLY (characters and indentation) and must be unique in the file, so include enough surrounding lines. Never put line numbers or ``` fences inside FIND or REPLACE.");
                 sb.AppendLine("- Keep edits small and focused. Do not rewrite whole files, and follow the existing code style and indentation.");
                 sb.AppendLine("- To INSERT code, FIND one existing line next to the insertion point and REPLACE it with that same line plus the new code. Never move or repeat the class's or method's own { } braces: an edit that makes the { } unbalanced is rejected.");
+                sb.AppendLine("- In C# files, all methods, properties and fields MUST be placed INSIDE the class body before the class's closing '}' brace. NEVER place a method after the class's closing brace (this causes compiler error CS1519/CS0116 and will be rejected). To insert at the end of a class, match the member immediately preceding the closing '}' and place the new method inside.");
                 sb.AppendLine("- Use WRITE_CODE only to create NEW files. Existing files larger than 20000 characters cannot be overwritten - use EDIT_FILE.");
                 sb.AppendLine("- Do not paste the code again in your normal reply. Briefly say what you changed and why.");
                 sb.AppendLine("- If an edit fails you will be told why. Read the file again and retry with corrected FIND text.");
@@ -722,6 +723,292 @@ namespace SlimeHelper
             }
 
             return n;
+        }
+
+        /// <summary>
+        /// Replaces the contents of comments and string literals with spaces,
+        /// preserving line breaks, line numbers, and brace characters outside comments/strings.
+        /// </summary>
+        public static string StripCommentsAndStrings(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+
+            char[] chars = text.ToCharArray();
+            int len = chars.Length;
+            int i = 0;
+
+            while (i < len)
+            {
+                char c = chars[i];
+
+                // Single-line comment: // ...
+                if (c == '/' && i + 1 < len && chars[i + 1] == '/')
+                {
+                    chars[i] = ' ';
+                    chars[i + 1] = ' ';
+                    i += 2;
+                    while (i < len && chars[i] != '\n' && chars[i] != '\r')
+                    {
+                        chars[i] = ' ';
+                        i++;
+                    }
+                    continue;
+                }
+
+                // Multi-line comment: /* ... */
+                if (c == '/' && i + 1 < len && chars[i + 1] == '*')
+                {
+                    chars[i] = ' ';
+                    chars[i + 1] = ' ';
+                    i += 2;
+                    while (i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/'))
+                    {
+                        if (chars[i] != '\r' && chars[i] != '\n') chars[i] = ' ';
+                        i++;
+                    }
+                    if (i + 1 < len)
+                    {
+                        chars[i] = ' ';
+                        chars[i + 1] = ' ';
+                        i += 2;
+                    }
+                    else if (i < len)
+                    {
+                        if (chars[i] != '\r' && chars[i] != '\n') chars[i] = ' ';
+                        i++;
+                    }
+                    continue;
+                }
+
+                // Character literal: '...'
+                if (c == '\'')
+                {
+                    chars[i] = ' ';
+                    i++;
+                    while (i < len && chars[i] != '\'')
+                    {
+                        if (chars[i] == '\\' && i + 1 < len)
+                        {
+                            chars[i] = ' ';
+                            chars[i + 1] = ' ';
+                            i += 2;
+                        }
+                        else if (chars[i] == '\n' || chars[i] == '\r')
+                        {
+                            break;
+                        }
+                        else
+                        {
+                            chars[i] = ' ';
+                            i++;
+                        }
+                    }
+                    if (i < len && chars[i] == '\'')
+                    {
+                        chars[i] = ' ';
+                        i++;
+                    }
+                    continue;
+                }
+
+                // String literals: raw string literals ("""..."""), verbatim (@"..."),
+                // interpolated ($"..."), or standard string literals ("...")
+                if (c == '$' || c == '@' || c == '"')
+                {
+                    int p = i;
+                    bool hasAt = false;
+
+                    while (p < len && (chars[p] == '$' || chars[p] == '@'))
+                    {
+                        if (chars[p] == '@') hasAt = true;
+                        p++;
+                    }
+
+                    if (p < len && chars[p] == '"')
+                    {
+                        // Check for raw string literals: 3 or more double quotes
+                        int quoteCount = 0;
+                        while (p + quoteCount < len && chars[p + quoteCount] == '"') quoteCount++;
+
+                        if (quoteCount >= 3)
+                        {
+                            for (int k = i; k < p + quoteCount; k++) chars[k] = ' ';
+                            p += quoteCount;
+                            while (p < len)
+                            {
+                                if (chars[p] == '"')
+                                {
+                                    int matchQuotes = 0;
+                                    while (p + matchQuotes < len && chars[p + matchQuotes] == '"') matchQuotes++;
+                                    if (matchQuotes >= quoteCount)
+                                    {
+                                        for (int k = 0; k < matchQuotes; k++) chars[p + k] = ' ';
+                                        p += matchQuotes;
+                                        break;
+                                    }
+                                    for (int k = 0; k < matchQuotes; k++) chars[p + k] = ' ';
+                                    p += matchQuotes;
+                                }
+                                else
+                                {
+                                    if (chars[p] != '\r' && chars[p] != '\n') chars[p] = ' ';
+                                    p++;
+                                }
+                            }
+                            i = p;
+                            continue;
+                        }
+
+                        // Verbatim string literal: @"..." or $@"...""
+                        if (hasAt)
+                        {
+                            for (int k = i; k <= p; k++) chars[k] = ' ';
+                            p++;
+                            while (p < len)
+                            {
+                                if (chars[p] == '"')
+                                {
+                                    if (p + 1 < len && chars[p + 1] == '"')
+                                    {
+                                        chars[p] = ' ';
+                                        chars[p + 1] = ' ';
+                                        p += 2;
+                                    }
+                                    else
+                                    {
+                                        chars[p] = ' ';
+                                        p++;
+                                        break;
+                                    }
+                                }
+                                else
+                                {
+                                    if (chars[p] != '\r' && chars[p] != '\n') chars[p] = ' ';
+                                    p++;
+                                }
+                            }
+                            i = p;
+                            continue;
+                        }
+
+                        // Regular or interpolated string: "..." or $"..."
+                        for (int k = i; k <= p; k++) chars[k] = ' ';
+                        p++;
+                        while (p < len)
+                        {
+                            if (chars[p] == '\\' && p + 1 < len)
+                            {
+                                chars[p] = ' ';
+                                chars[p + 1] = ' ';
+                                p += 2;
+                            }
+                            else if (chars[p] == '"')
+                            {
+                                chars[p] = ' ';
+                                p++;
+                                break;
+                            }
+                            else if (chars[p] == '\n' || chars[p] == '\r')
+                            {
+                                break;
+                            }
+                            else
+                            {
+                                chars[p] = ' ';
+                                p++;
+                            }
+                        }
+                        i = p;
+                        continue;
+                    }
+                }
+
+                i++;
+            }
+
+            return new string(chars);
+        }
+
+        /// <summary>
+        /// Validates that in C# files with a namespace, methods and properties are not declared
+        /// directly at namespace scope outside any class, struct, record, or interface.
+        /// Returns an error message if a misplaced member is detected, or null if valid.
+        /// </summary>
+        public static string? CheckCSharpMethodPlacement(string content)
+        {
+            if (string.IsNullOrWhiteSpace(content)) return null;
+
+            string clean = StripCommentsAndStrings(content);
+            if (!Regex.IsMatch(clean, @"\bnamespace\b")) return null;
+
+            bool hasBlockNamespace = Regex.IsMatch(clean, @"\bnamespace\s+[\w\.]+\s*\{");
+            int targetDepth = hasBlockNamespace ? 1 : 0;
+            int depth = 0;
+            string[] lines = clean.Split('\n');
+            bool inTypeHeader = false;
+            bool inAttribute = false;
+
+            for (int lineIndex = 0; lineIndex < lines.Length; lineIndex++)
+            {
+                string line = lines[lineIndex].Trim();
+                int beforeDepth = depth;
+
+                foreach (char c in line)
+                {
+                    if (c == '{') depth++;
+                    else if (c == '}') depth--;
+                }
+
+                if (inAttribute)
+                {
+                    if (line.Contains("]")) inAttribute = false;
+                    continue;
+                }
+
+                if (inTypeHeader)
+                {
+                    if (line.Contains("{") || line.Contains(";")) inTypeHeader = false;
+                    continue;
+                }
+
+                if (beforeDepth == targetDepth)
+                {
+                    if (string.IsNullOrEmpty(line)) continue;
+                    if (line.StartsWith("using ", StringComparison.Ordinal) ||
+                        line.StartsWith("global using ", StringComparison.Ordinal) ||
+                        line.StartsWith("#"))
+                    {
+                        continue;
+                    }
+
+                    if (line.StartsWith("["))
+                    {
+                        if (!line.Contains("]")) inAttribute = true;
+                        continue;
+                    }
+
+                    if (Regex.IsMatch(line, @"\bnamespace\b")) continue;
+
+                    if (Regex.IsMatch(line, @"\b(?:class|struct|interface|record|enum|delegate)\b"))
+                    {
+                        if (!line.Contains("{") && !line.Contains(";")) inTypeHeader = true;
+                        continue;
+                    }
+
+                    // Check for method signatures or members with access modifiers at namespace level
+                    bool isMethod = Regex.IsMatch(line, @"\b(?:public|private|protected|internal|static|async|virtual|override|void)\b.*?\w+\s*\([^;{}]*\)\s*(?:\{|=>|$)");
+                    bool isMemberWithModifier = Regex.IsMatch(line, @"^\s*(?:public|private|protected|internal)\s+");
+
+                    if (isMethod || isMemberWithModifier)
+                    {
+                        return $"the edit placed a method or member outside of any class or struct (at line {lineIndex + 1}: '{line}'). " +
+                               "In C#, methods and properties MUST be placed INSIDE the class body before the closing '}'. " +
+                               "Read the file, check the class closing brace, and place the method inside the class.";
+                    }
+                }
+            }
+
+            return null;
         }
 
         // --- READ_FILE (flera per svar, med valfritt radintervall) ---
@@ -1081,6 +1368,16 @@ namespace SlimeHelper
                     {
                         error = $"the edit would unbalance the curly braces {{ }} (net difference {after - before}). " +
                                 "Include whole blocks in FIND/REPLACE, and never add a { without its matching }. Do not move or repeat the class's or method's own braces";
+                        return false;
+                    }
+                }
+
+                if (Path.GetExtension(fullPath).Equals(".cs", StringComparison.OrdinalIgnoreCase))
+                {
+                    string? placementError = CheckCSharpMethodPlacement(content);
+                    if (placementError != null)
+                    {
+                        error = placementError;
                         return false;
                     }
                 }
@@ -1617,6 +1914,15 @@ namespace SlimeHelper
                     sb.AppendLine($"Errors ({errors.Count}):");
                     foreach (var e in errors.Take(30)) sb.AppendLine(e);
                     if (errors.Count > 30) sb.AppendLine($"... (+{errors.Count - 30} more errors)");
+
+                    bool hasOutsideClassError = errors.Any(e =>
+                        e.Contains("CS1519") || e.Contains("CS0116") || e.Contains("CS1513") || e.Contains("CS8802"));
+                    if (hasOutsideClassError)
+                    {
+                        sb.AppendLine("\n[DIAGNOSTIC HINT: CS1519/CS0116/CS1513 indicates a method or member was placed OUTSIDE a class body at namespace scope, or a closing brace '}' prematurely closed the class. In C#, all methods and properties MUST be placed INSIDE the class body before the class's closing '}' brace.]");
+                    }
+
+                    AppendFailingFileContext(sb, errors, basePath);
                 }
 
                 if (warnings > 0) sb.AppendLine($"({warnings} warnings, not shown)");
@@ -1644,6 +1950,55 @@ namespace SlimeHelper
             }
 
             return result;
+        }
+
+        private static void AppendFailingFileContext(System.Text.StringBuilder sb, List<string> errors, string basePath)
+        {
+            var filesSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var err in errors.Take(3))
+            {
+                var match = Regex.Match(err, @"^(?<file>[^(:)]+?\.(?:cs|ts|js))\((?<line>\d+)");
+                if (!match.Success) continue;
+
+                string rel = match.Groups["file"].Value.Trim().Replace('\\', '/');
+                if (!int.TryParse(match.Groups["line"].Value, out int errLine)) errLine = 1;
+
+                if (!filesSeen.Add(rel)) continue;
+
+                string? full = ResolveSafePath(basePath, rel);
+                if (full == null && !Path.IsPathRooted(rel))
+                {
+                    full = FindUniqueMatchingFile(basePath, rel, out _);
+                }
+                if (full == null || !File.Exists(full)) continue;
+
+                try
+                {
+                    string[] allLines = File.ReadAllText(full).Replace("\r\n", "\n").Split('\n');
+                    sb.AppendLine($"\nCurrent file content on disk for {rel}:");
+                    sb.AppendLine("```");
+
+                    int start = 1;
+                    int end = allLines.Length;
+                    if (allLines.Length > 60)
+                    {
+                        start = Math.Max(1, errLine - 15);
+                        end = Math.Min(allLines.Length, errLine + 15);
+                    }
+
+                    for (int i = start; i <= end; i++)
+                    {
+                        sb.AppendLine($"{i,4}: {allLines[i - 1]}");
+                    }
+                    if (end < allLines.Length) sb.AppendLine($"... (+{allLines.Length - end} more lines)");
+                    sb.AppendLine("```");
+                }
+                catch
+                {
+                    // Ignore file read exceptions in diagnostics
+                }
+            }
         }
 
         // --- SEARCH_FILES ---
@@ -2255,6 +2610,16 @@ namespace SlimeHelper
                 }
 
                 if (crlf) content = content.Replace("\r\n", "\n").Replace("\n", "\r\n");
+
+                if (Path.GetExtension(fullPath).Equals(".cs", StringComparison.OrdinalIgnoreCase))
+                {
+                    string? placementError = CheckCSharpMethodPlacement(content);
+                    if (placementError != null)
+                    {
+                        error = placementError;
+                        return false;
+                    }
+                }
 
                 Directory.CreateDirectory(Path.GetDirectoryName(fullPath) ?? basePath);
                 File.WriteAllText(fullPath, content, new System.Text.UTF8Encoding(hasBom));

@@ -1165,7 +1165,9 @@ namespace SlimeHelper
                         if (hasCheckFailure)
                         {
                             loopBuilder.AppendLine("A previous check (build/test/lint) FAILED with errors shown in the tool results above. Read the error messages carefully and use [EDIT_FILE] to FIX the error. " +
-                                                   "Do NOT duplicate or re-insert methods that are already present in the file; only repair the compilation or test error. After fixing, verify again with [RUN_CHECK: build].");
+                                                   "Do NOT duplicate or re-insert methods that are already present in the file; only repair the compilation or test error. " +
+                                                   "In C#, ensure all methods and properties are located INSIDE the class body before the class's closing '}' brace. " +
+                                                   "Inspect the file lines shown above to place members correctly. After fixing, verify again with [RUN_CHECK: build].");
                         }
                         else if (hasCheckResult)
                         {
@@ -1176,7 +1178,9 @@ namespace SlimeHelper
                         else if (followUpPrompt.Contains("EDIT_FILE on") && followUpPrompt.Contains("FAILED"))
                         {
                             // An edit attempt failed in this turn
-                            loopBuilder.AppendLine("Your last edit attempt FAILED as shown in the tool results above. Read the error message carefully. If you need to inspect the current file content on disk, use [READ_FILE]. Otherwise, ensure your [FIND] text matches the file exactly.");
+                            loopBuilder.AppendLine("Your last edit attempt FAILED as shown in the tool results above. Read the error message carefully. " +
+                                                   "If the error says a method was placed outside a class, ensure your replacement puts the method INSIDE the class before the closing '}'. " +
+                                                   "If you need to inspect the current file content on disk, use [READ_FILE]. Otherwise, ensure your [FIND] text matches the file exactly.");
                         }
                         else
                         {
