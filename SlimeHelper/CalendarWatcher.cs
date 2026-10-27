@@ -1,4 +1,4 @@
-﻿using Google.Apis.Auth.OAuth2;
+using Google.Apis.Auth.OAuth2;
 using Google.Apis.Calendar.v3;
 using Google.Apis.Calendar.v3.Data;
 using Google.Apis.Services;
@@ -12,93 +12,56 @@ namespace SlimeHelper
         private static readonly string[] Scopes = [CalendarService.Scope.Calendar];
         private const string ApplicationName = "Slime Helper";
 
+        /// <summary>Tar med helgdags- och födelsedagskalendrar (av som standard, annars tar de lätt över "nästa händelse").</summary>
+        public bool IncludeHolidaysAndBirthdays { get; set; } = false;
+
+        // Samma inloggning som förut (credentials.json + token.json), men på ett ställe
+        private static async Task<CalendarService> CreateServiceAsync()
+        {
+            UserCredential credential;
+            string credPath = "credentials.json";
+
+            using (var stream = new FileStream(credPath, FileMode.Open, FileAccess.Read))
+            {
+                // Sparar tokens lokalt i AppData så du slipper logga in varje gång
+                string tokenPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SlimeHelper", "token.json");
+
+                credential = await GoogleWebAuthorizationBroker.AuthorizeAsync(
+                    GoogleClientSecrets.FromStream(stream).Secrets,
+                    Scopes,
+                    "user",
+                    CancellationToken.None,
+                    new FileDataStore(tokenPath, true));
+            }
+
+            return new CalendarService(new BaseClientService.Initializer
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = ApplicationName,
+            });
+        }
+
         public async Task<string?> GetNextEventAsync()
         {
             try
             {
-                UserCredential credential;
-                string credPath = "credentials.json";
+                var service = await CreateServiceAsync();
+                var now = DateTimeOffset.Now;
 
-                using (var stream = new FileStream(credPath, FileMode.Open, FileAccess.Read))
+                // Alla kalendrar du ser i Google Kalender (huvudkalendern + delade kalendrar från andra konton), inte bara "primary"
+                List<CalendarRef> calendars = await GetVisibleCalendarsAsync(service);
+                if (calendars.Count == 0)
                 {
-                    // Sparar tokens lokalt i AppData så du slipper logga in varje gång
-                    string tokenPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SlimeHelper", "token.json");
-
-                    credential = await GoogleWebAuthorizationBroker.AuthorizeAsync(
-                        GoogleClientSecrets.FromStream(stream).Secrets,
-                        Scopes,
-                        "user",
-                        CancellationToken.None,
-                        new FileDataStore(tokenPath, true));
+                    calendars.Add(new CalendarRef("primary", "primary", true)); // aldrig sämre än förut
                 }
 
-                // Skapa kalendertjänsten
-                var service = new CalendarService(new BaseClientService.Initializer
+                // Alla kalendrar hämtas samtidigt; en som misslyckas stoppar inte de andra
+                var perCalendar = await Task.WhenAll(calendars.Select(c => FetchUpcomingAsync(service, c, now)));
+
+                var next = CalendarMerge.MergeUpcoming(perCalendar.SelectMany(x => x)).FirstOrDefault();
+                if (next != null)
                 {
-                    HttpClientInitializer = credential,
-                    ApplicationName = ApplicationName,
-                });
-
-                // 1. Hämta en lista över ALLA kalendrar användaren har tillgång till
-                var calendarList = await service.CalendarList.List().ExecuteAsync();
-
-                Event? closestEvent = null;
-                DateTimeOffset closestTime = DateTimeOffset.MaxValue;
-
-                // 2. Loopa igenom varje kalender (privat, jobb, delade)
-                foreach (var calendar in calendarList.Items)
-                {
-                    try
-                    {
-                        EventsResource.ListRequest request = service.Events.List(calendar.Id);
-                        request.TimeMinDateTimeOffset = DateTimeOffset.Now;
-                        request.ShowDeleted = false;
-                        request.SingleEvents = true;
-                        request.OrderBy = EventsResource.ListRequest.OrderByEnum.StartTime;
-                        request.MaxResults = 1;
-
-                        Events events = await request.ExecuteAsync();
-                        var items = events.Items;
-
-                        if (items != null && items.Count > 0)
-                        {
-                            var nextEvent = items[0];
-                            DateTimeOffset eventTime;
-
-                            // Hantera både tidsbestämda möten och heldagsevents
-                            if (nextEvent.Start.DateTimeDateTimeOffset.HasValue)
-                            {
-                                eventTime = nextEvent.Start.DateTimeDateTimeOffset.Value;
-                            }
-                            else if (DateTime.TryParse(nextEvent.Start.Date, out DateTime parsedDate))
-                            {
-                                eventTime = new DateTimeOffset(parsedDate);
-                            }
-                            else
-                            {
-                                continue;
-                            }
-
-                            // Spara mötet om det ligger närmare i tiden än det vi hittills hittat
-                            if (eventTime < closestTime)
-                            {
-                                closestTime = eventTime;
-                                closestEvent = nextEvent;
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // Ignorera specifika kalendrar om vi saknar läsrättigheter till just dem
-                        continue;
-                    }
-                }
-
-                // 3. Returnera det absolut närmaste mötet från alla kalendrar
-                if (closestEvent != null)
-                {
-                    string when = closestEvent.Start.DateTimeDateTimeOffset?.ToString("HH:mm") ?? closestEvent.Start.Date;
-                    return $"{closestEvent.Summary} kl {when}";
+                    return CalendarMerge.Format(next, now, showCalendarName: calendars.Count > 1);
                 }
             }
             catch (Exception ex)
@@ -107,6 +70,108 @@ namespace SlimeHelper
             }
 
             return null;
+        }
+
+        private async Task<List<CalendarRef>> GetVisibleCalendarsAsync(CalendarService service)
+        {
+            var result = new List<CalendarRef>();
+
+            try
+            {
+                string? pageToken = null;
+                do
+                {
+                    CalendarListResource.ListRequest request = service.CalendarList.List();
+                    request.PageToken = pageToken;
+                    CalendarList page = await request.ExecuteAsync();
+
+                    var entries = page.Items;
+                    if (entries != null)
+                    {
+                        foreach (var entry in entries)
+                        {
+                            string id = entry.Id ?? "";
+                            if (!CalendarMerge.ShouldRead(id, entry.Primary, entry.Selected, entry.Hidden, entry.Deleted, entry.AccessRole, IncludeHolidaysAndBirthdays))
+                                continue;
+
+                            string name = id;
+                            if (!string.IsNullOrWhiteSpace(entry.SummaryOverride)) name = entry.SummaryOverride;
+                            else if (!string.IsNullOrWhiteSpace(entry.Summary)) name = entry.Summary;
+
+                            result.Add(new CalendarRef(id, name, entry.Primary == true));
+                        }
+                    }
+
+                    pageToken = page.NextPageToken;
+                } while (!string.IsNullOrEmpty(pageToken));
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Could not list calendars: {ex.Message}");
+            }
+
+            return result;
+        }
+
+        private static async Task<List<CalendarItem>> FetchUpcomingAsync(CalendarService service, CalendarRef calendar, DateTimeOffset now)
+        {
+            var items = new List<CalendarItem>();
+
+            try
+            {
+                // Händelser från och med nu (samma sökning som förut, men per kalender och med några fler träffar att slå ihop)
+                EventsResource.ListRequest request = service.Events.List(calendar.Id);
+                request.TimeMinDateTimeOffset = now;
+                request.ShowDeleted = false;
+                request.SingleEvents = true;
+                request.OrderBy = EventsResource.ListRequest.OrderByEnum.StartTime;
+                request.MaxResults = 5;
+
+                Events events = await request.ExecuteAsync();
+                if (events.Items != null)
+                {
+                    foreach (var e in events.Items)
+                    {
+                        var item = ToItem(calendar, e);
+                        if (item != null) items.Add(item);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Calendar '{calendar.Name}' could not be read: {ex.Message}");
+            }
+
+            return items;
+        }
+
+        private static CalendarItem? ToItem(CalendarRef calendar, Event e)
+        {
+            if (e.Status == "cancelled") return null;
+
+            // En händelse du själv har tackat nej till ska inte visas som "nästa"
+            if (e.Attendees != null && e.Attendees.Any(a => a.Self == true && a.ResponseStatus == "declined")) return null;
+
+            DateTimeOffset start;
+            bool allDay;
+
+            if (e.Start?.DateTimeDateTimeOffset is DateTimeOffset timed)
+            {
+                start = timed;
+                allDay = false;
+            }
+            else if (DateTime.TryParse(e.Start?.Date, out DateTime day))
+            {
+                start = new DateTimeOffset(DateTime.SpecifyKind(day.Date, DateTimeKind.Local));
+                allDay = true;
+            }
+            else
+            {
+                return null;
+            }
+
+            string summary = string.IsNullOrWhiteSpace(e.Summary) ? "(no title)" : e.Summary.Trim();
+            return new CalendarItem(calendar, summary, start, allDay, e.ICalUID);
         }
 
         public async Task<bool> AddEventAsync(string input)
@@ -152,7 +217,6 @@ namespace SlimeHelper
                     }
                 };
 
-                // Lägger till nya events i huvudkalendern
                 EventsResource.InsertRequest request = service.Events.Insert(newEvent, "primary");
                 await request.ExecuteAsync();
                 return true;
@@ -219,15 +283,15 @@ namespace SlimeHelper
             else
             {
                 var daysMap = new Dictionary<string, DayOfWeek>
-                {
-                    { "måndag", DayOfWeek.Monday }, { "monday", DayOfWeek.Monday },
-                    { "tisdag", DayOfWeek.Tuesday }, { "tuesday", DayOfWeek.Tuesday },
-                    { "onsdag", DayOfWeek.Wednesday }, { "wednesday", DayOfWeek.Wednesday },
-                    { "torsdag", DayOfWeek.Thursday }, { "thursday", DayOfWeek.Thursday },
-                    { "fredag", DayOfWeek.Friday }, { "friday", DayOfWeek.Friday },
-                    { "lördag", DayOfWeek.Saturday }, { "saturday", DayOfWeek.Saturday },
-                    { "söndag", DayOfWeek.Sunday }, { "sunday", DayOfWeek.Sunday }
-                };
+        {
+            { "måndag", DayOfWeek.Monday }, { "monday", DayOfWeek.Monday },
+            { "tisdag", DayOfWeek.Tuesday }, { "tuesday", DayOfWeek.Tuesday },
+            { "onsdag", DayOfWeek.Wednesday }, { "wednesday", DayOfWeek.Wednesday },
+            { "torsdag", DayOfWeek.Thursday }, { "thursday", DayOfWeek.Thursday },
+            { "fredag", DayOfWeek.Friday }, { "friday", DayOfWeek.Friday },
+            { "lördag", DayOfWeek.Saturday }, { "saturday", DayOfWeek.Saturday },
+            { "söndag", DayOfWeek.Sunday }, { "sunday", DayOfWeek.Sunday }
+        };
 
                 foreach (var pair in daysMap)
                 {
