@@ -95,6 +95,7 @@ namespace SlimeHelper
         public static void ResetModificationCount()
         {
             ModificationCount = 0;
+            WriteFailureCount = 0;
             lock (Activity) { Activity.Clear(); }
         }
 
@@ -1225,10 +1226,18 @@ namespace SlimeHelper
                 results.Add(result);
             }
 
-            string combined = string.Join("\n\n", results) +
-                "\n\nNow continue fulfilling the user's request. If a check FAILED, read the errors, fix them (READ_FILE, then EDIT_FILE) and run the check again - " +
-                "but stop after 3 failed attempts and tell the user what is still failing. If it SUCCEEDED, tell the user. " +
-                "Never claim that the code builds or that tests pass unless a CHECK RESULT says SUCCEEDED.";
+            bool anyFailed = results.Any(r =>
+                r.Contains("- FAILED") ||
+                r.Contains("- TIMED OUT") ||
+                r.Contains("[CHECK RESULT: NOT RUN"));
+
+            string instructionSuffix = anyFailed
+                ? "\n\nNow continue fulfilling the user's request. A check FAILED with errors shown above. Read the errors, fix them (READ_FILE, then EDIT_FILE) and run the check again - " +
+                  "but stop after 3 failed attempts and tell the user what is still failing. " +
+                  "Never claim that the code builds or that tests pass unless a CHECK RESULT says SUCCEEDED."
+                : "\n\nAll checks SUCCEEDED! Now continue fulfilling the user's request by confirming to the user that the code builds and changes are verified. Do NOT output [EDIT_FILE] or repeat the changes.";
+
+            string combined = string.Join("\n\n", results) + instructionSuffix;
 
             return string.IsNullOrEmpty(existingFollowUp) ? combined : existingFollowUp + "\n\n" + combined;
         }

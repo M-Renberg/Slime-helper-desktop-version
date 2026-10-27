@@ -487,6 +487,9 @@ namespace SlimeHelper.Checks
             SlimeToolManager.ProcessResponse("[RUN_CHECK: build]", tag, repo, brain, out _, out checks);
             res = await SlimeToolManager.RunCheckRequestsAsync(checks, repo, tag, "");
             Check(res.Contains("SUCCEEDED") && prompts == 1, "the fixed build SUCCEEDED, still only one prompt", Short(res, 500));
+            Check(!res.Contains("FAILED"), "the fixed build result does not contain FAILED", Short(res, 500));
+            SlimeToolManager.ResetModificationCount();
+            Check(SlimeToolManager.WriteFailureCount == 0 && SlimeToolManager.ModificationCount == 0, "ResetModificationCount resets WriteFailureCount and ModificationCount");
 
             // editing a build file revokes the approval
             SlimeToolManager.ProcessResponse("[READ_FILE: App/App.csproj]", tag, repo, brain, out _, out _);

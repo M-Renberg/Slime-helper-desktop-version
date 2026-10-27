@@ -9,6 +9,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using System.Text.RegularExpressions;
 
 
 namespace SlimeHelper
@@ -1156,16 +1157,31 @@ namespace SlimeHelper
                     else if (SlimeToolManager.ModificationCount > 0)
                     {
                         // File has already been modified on disk during this request
-                        bool hasCheckFailure = followUpPrompt.Contains("FAILED") || agentLog.ToString().Contains("FAILED");
+                        bool hasCheckResult = followUpPrompt.Contains("[CHECK RESULT:");
+                        bool hasCheckFailure = hasCheckResult && (
+                            Regex.IsMatch(followUpPrompt, @"\[CHECK RESULT:[^\]]*-\s*FAILED") ||
+                            Regex.IsMatch(followUpPrompt, @"\[CHECK RESULT:[^\]]*-\s*TIMED OUT") ||
+                            followUpPrompt.Contains("[CHECK RESULT: NOT RUN"));
                         if (hasCheckFailure)
                         {
-                            loopBuilder.AppendLine("A previous build check FAILED with compiler errors shown in the tool results above. Read the error messages carefully and use [EDIT_FILE] to FIX the error. " +
-                                                   "Do NOT duplicate or re-insert methods that are already present in the file; only repair the compilation error. After fixing, verify again with [RUN_CHECK: build].");
+                            loopBuilder.AppendLine("A previous check (build/test/lint) FAILED with errors shown in the tool results above. Read the error messages carefully and use [EDIT_FILE] to FIX the error. " +
+                                                   "Do NOT duplicate or re-insert methods that are already present in the file; only repair the compilation or test error. After fixing, verify again with [RUN_CHECK: build].");
+                        }
+                        else if (hasCheckResult)
+                        {
+                            // All checks completed successfully
+                            loopBuilder.AppendLine("The requested change has ALREADY been successfully written to disk and verified. Do NOT output [EDIT_FILE] or [WRITE_CODE] again to repeat the change. " +
+                                                   "Provide your final response to the user now, briefly summarizing what you did and confirming that the build succeeded.");
+                        }
+                        else if (followUpPrompt.Contains("EDIT_FILE on") && followUpPrompt.Contains("FAILED"))
+                        {
+                            // An edit attempt failed in this turn
+                            loopBuilder.AppendLine("Your last edit attempt FAILED as shown in the tool results above. Read the error message carefully. If you need to inspect the current file content on disk, use [READ_FILE]. Otherwise, ensure your [FIND] text matches the file exactly.");
                         }
                         else
                         {
-                            loopBuilder.AppendLine("The requested change has ALREADY been successfully written to disk and verified. Do NOT output [EDIT_FILE] or [WRITE_CODE] again to repeat the change. " +
-                                                   "Provide your final response to the user now, briefly summarizing what you did and confirming that the build succeeded.");
+                            loopBuilder.AppendLine("The requested change has ALREADY been successfully written to disk. Do NOT output [EDIT_FILE] or [WRITE_CODE] again to repeat the change. " +
+                                                   "Provide your final response to the user now, briefly summarizing what you did.");
                         }
                     }
                     else if (SlimeToolManager.IsChangeRequest(prompt))
