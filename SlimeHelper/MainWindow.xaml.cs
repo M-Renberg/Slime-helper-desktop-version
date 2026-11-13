@@ -49,6 +49,13 @@ namespace SlimeHelper
         private readonly CalendarWatcher _calendarWatcher = new();
         private DispatcherTimer? _calendarTimer;
 
+        // GitHub Watcher
+        private readonly GitHubWatcher _gitHubWatcher = new();
+        private GitHubWorkflowRun? _lastFailedRun;
+        private string? _lastFailedLogSnippet;
+
+        public GitHubWatcher GitHubWatcher => _gitHubWatcher;
+
         //new
         private DispatcherTimer? _motionTimer;
         private readonly Stopwatch _motionClock = Stopwatch.StartNew();
@@ -182,6 +189,36 @@ namespace SlimeHelper
                 _codeWatcher.Start(settings.ReposRootPath);
             }
 
+            // GitHub Watcher Initialization
+            _gitHubWatcher.GitHubToken = settings.GitHubToken;
+
+            _gitHubWatcher.OnWorkflowFailed += (run, logSnippet) =>
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    _lastFailedRun = run;
+                    _lastFailedLogSnippet = logSnippet;
+                    PlaySounds("Warning.wav");
+                    string failureMsg = $"CI failed on {run.Name} ({run.HeadBranch})! 🚨\nClick to inspect failure.";
+                    ShowTempMessage(failureMsg, "ERROR", 8);
+                });
+            };
+
+            _gitHubWatcher.OnWorkflowSucceeded += (run) =>
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    PlaySounds("Idle.wav");
+                    string successMsg = $"CI passed on {run.Name} ({run.HeadBranch})! 🎉";
+                    ShowTempMessage(successMsg, "HURRAY", 6);
+                });
+            };
+
+            string initialGhPath = !string.IsNullOrEmpty(settings.ReposRootPath) && Directory.Exists(settings.ReposRootPath)
+                ? settings.ReposRootPath
+                : Directory.GetCurrentDirectory();
+            _gitHubWatcher.Start(initialGhPath, settings.GitHubToken);
+
             // Drag function
             MouseLeftButtonDown += (s, e) =>
             {
@@ -221,6 +258,7 @@ namespace SlimeHelper
 
             Closed += (s, e) =>
             {
+                _gitHubWatcher.Dispose();
                 _wordWatcher.Dispose();
                 _activityWatcher.Dispose();
                 _codeWatcher.Dispose();
@@ -492,6 +530,7 @@ namespace SlimeHelper
 
         private void CloseApp(object sender, RoutedEventArgs e)
         {
+            _gitHubWatcher.Dispose();
             _wordWatcher.Dispose();
             _activityWatcher.Dispose();
             _codeWatcher.Dispose();
@@ -716,17 +755,22 @@ namespace SlimeHelper
             ShowTempMessage(greeting, "IDLE", 3);
         }
 
-        public void OpenChatWindow(string? initialThread = null)
+        public void OpenChatWindow(string? initialThread = null, GitHubWorkflowRun? failedRun = null, string? failedLog = null)
         {
             if (_chatWindow == null || !_chatWindow.IsLoaded)
             {
-                _chatWindow = new ChatWindow(this, _brainManager, _calendarWatcher);
+                _chatWindow = new ChatWindow(this, _brainManager, _calendarWatcher, _gitHubWatcher);
                 _chatWindow.Closed += (s, e) => _chatWindow = null;
             }
 
             if (!string.IsNullOrEmpty(initialThread))
             {
                 _chatWindow.SelectThread(initialThread);
+            }
+
+            if (failedRun != null)
+            {
+                _chatWindow.DisplayWorkflowFailure(failedRun, failedLog);
             }
 
             _chatWindow.Show();
@@ -744,7 +788,18 @@ namespace SlimeHelper
 
         private void SpeechBubble_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
-            OpenChatWindow();
+            if (_lastFailedRun != null)
+            {
+                var run = _lastFailedRun;
+                var log = _lastFailedLogSnippet;
+                _lastFailedRun = null;
+                _lastFailedLogSnippet = null;
+                OpenChatWindow(failedRun: run, failedLog: log);
+            }
+            else
+            {
+                OpenChatWindow();
+            }
         }
 
         private void SaveSettings()
@@ -1442,9 +1497,62 @@ namespace SlimeHelper
                 SaveFullSettings(currentSettings);
 
                 _codeWatcher.Start(currentSettings.ReposRootPath);
+                _gitHubWatcher.SetActiveRepo(currentSettings.ReposRootPath);
 
                 ShowTempMessage("Git Repositories folder linked!", "NOTES", 3);
                 PlaySounds("Idle.wav");
+            }
+        }
+
+        private void OnSetGitHubTokenClick(object sender, RoutedEventArgs e)
+        {
+            var currentSettings = LoadFullSettings();
+            string token = SlimeInputDialog.Show("GitHub Configuration", "Enter your GitHub Personal Access Token (PAT):", currentSettings.GitHubToken);
+
+            if (!string.IsNullOrWhiteSpace(token) && token != "Enter your Key here!")
+            {
+                currentSettings.GitHubToken = token.Trim();
+                SaveFullSettings(currentSettings);
+                _gitHubWatcher.GitHubToken = currentSettings.GitHubToken;
+                ShowTempMessage("GitHub token saved! 🐙✨", "IDLE", 3);
+                PlaySounds("Idle.wav");
+            }
+        }
+
+        private async void OnAutoDetectGitHubTokenClick(object sender, RoutedEventArgs e)
+        {
+            string? ghToken = GitHubService.TryGetGhCliToken();
+            if (!string.IsNullOrWhiteSpace(ghToken))
+            {
+                var currentSettings = LoadFullSettings();
+                currentSettings.GitHubToken = ghToken;
+                SaveFullSettings(currentSettings);
+                _gitHubWatcher.GitHubToken = ghToken;
+                ShowTempMessage("Auto-detected token from GitHub CLI! 🐙💻", "HURRAY", 4);
+                PlaySounds("Idle.wav");
+            }
+            else
+            {
+                ShowTempMessage("Could not detect token from `gh auth token`. Make sure gh is logged in!", "WARNING", 5);
+                PlaySounds("Warning.wav");
+            }
+        }
+
+        private async void OnTestGitHubConnectionClick(object sender, RoutedEventArgs e)
+        {
+            ShowTempMessage("Testing GitHub connection...", "THINKING", 3);
+            var currentSettings = LoadFullSettings();
+            string? token = !string.IsNullOrWhiteSpace(currentSettings.GitHubToken) ? currentSettings.GitHubToken : null;
+            var (ok, user, rate) = await _gitHubWatcher.Service.TestConnectionAsync(token);
+            if (ok)
+            {
+                ShowTempMessage($"Connected as @{user}! (Rate remaining: {rate}) 🐙🎉", "HURRAY", 5);
+                PlaySounds("Idle.wav");
+            }
+            else
+            {
+                ShowTempMessage($"GitHub connection failed: {user} ❌", "ERROR", 5);
+                PlaySounds("Warning.wav");
             }
         }
 
@@ -1666,7 +1774,7 @@ namespace SlimeHelper
 
 
         //LOAD AND SAVE FUNCTIONS
-        private void SaveFullSettings(SlimeSettings settings)
+        public void SaveFullSettings(SlimeSettings settings)
         {
             try
             {
@@ -1679,7 +1787,7 @@ namespace SlimeHelper
             }
         }
 
-        private SlimeSettings LoadFullSettings()
+        public SlimeSettings LoadFullSettings()
         {
             try
             {
@@ -1849,6 +1957,7 @@ namespace SlimeHelper
         public string SelectedProvider { get; set; } = "Gemini";
         public string GeminiKey { get; set; } = "";
         public string ClaudeKey { get; set; } = "";
+        public string GitHubToken { get; set; } = "";
         public string ObsidianVaultPath { get; set; } = "";
         public string ReposRootPath { get; set; } = "";
         public bool AutoStartWithWindows { get; set; } = false;

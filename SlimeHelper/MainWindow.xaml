@@ -86,6 +86,29 @@
                         <TextBlock Text="🔑"/>
                     </MenuItem.Icon>
                 </MenuItem>
+
+                <Separator/>
+
+                <MenuItem Header="GitHub Assistant">
+                    <MenuItem.Icon>
+                        <TextBlock Text="🐙"/>
+                    </MenuItem.Icon>
+                    <MenuItem Header="Set GitHub Token..." Click="OnSetGitHubTokenClick">
+                        <MenuItem.Icon>
+                            <TextBlock Text="🔑"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                    <MenuItem Header="Auto-detect from gh CLI" Click="OnAutoDetectGitHubTokenClick">
+                        <MenuItem.Icon>
+                            <TextBlock Text="💻"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                    <MenuItem Header="Test GitHub Connection" Click="OnTestGitHubConnectionClick">
+                        <MenuItem.Icon>
+                            <TextBlock Text="⚡"/>
+                        </MenuItem.Icon>
+                    </MenuItem>
+                </MenuItem>
             </MenuItem>
 
             <Separator/>

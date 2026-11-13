@@ -60,6 +60,7 @@ namespace SlimeHelper.Checks
                 await RunCheckTests(brain, work);
                 await TrailTests(brain, work);
                 ToolExecutionSpecialistTests(brain, work);
+                await GitHubTests(work);
             }
             finally
             {
@@ -710,6 +711,135 @@ namespace SlimeHelper.Checks
             Check(swedishRequests.All(SlimeToolManager.IsChangeRequest),
                   "Swedish infinitive and imperative forms are recognised as change requests",
                   string.Join(" | ", swedishRequests.Where(x => !SlimeToolManager.IsChangeRequest(x))));
+        }
+
+        // ------------------------------------------------------------------ github assistant
+        static async Task GitHubTests(string work)
+        {
+            Console.WriteLine("\n== GitHub Assistant: service and watcher");
+
+            // URL parsing
+            var httpsRes = GitHubService.ParseGitHubUrl("https://github.com/octocat/Hello-World.git");
+            Check(httpsRes == ("octocat", "Hello-World"), "HTTPS url parsed with .git", $"{httpsRes}");
+
+            var httpsNoGit = GitHubService.ParseGitHubUrl("https://github.com/octocat/Hello-World");
+            Check(httpsNoGit == ("octocat", "Hello-World"), "HTTPS url parsed without .git", $"{httpsNoGit}");
+
+            var sshRes = GitHubService.ParseGitHubUrl("git@github.com:octocat/Hello-World.git");
+            Check(sshRes == ("octocat", "Hello-World"), "SSH url parsed with .git", $"{sshRes}");
+
+            var sshProtoRes = GitHubService.ParseGitHubUrl("ssh://git@github.com/octocat/Hello-World.git");
+            Check(sshProtoRes == ("octocat", "Hello-World"), "ssh:// protocol url parsed", $"{sshProtoRes}");
+
+            var tokenRes = GitHubService.ParseGitHubUrl("https://ghp_secretToken@github.com/slime-org/slime-repo.git");
+            Check(tokenRes == ("slime-org", "slime-repo"), "Token embedded url parsed", $"{tokenRes}");
+
+            var nonGithub = GitHubService.ParseGitHubUrl("https://gitlab.com/octocat/Hello-World.git");
+            Check(nonGithub == null, "Non-github url rejected");
+
+            var invalidUrl = GitHubService.ParseGitHubUrl("not-a-url");
+            Check(invalidUrl == null, "Invalid url rejected");
+
+            // Local folder git config discovery
+            string mockRepo = Path.Combine(work, "mock_gh_repo");
+            string gitDir = Path.Combine(mockRepo, ".git");
+            Directory.CreateDirectory(gitDir);
+            string gitConfig = "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = git@github.com:myorg/myrepo.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n";
+            File.WriteAllText(Path.Combine(gitDir, "config"), gitConfig);
+
+            var discovered = GitHubService.GetRepoInfo(mockRepo);
+            Check(discovered == ("myorg", "myrepo"), "Local .git/config parsed for owner and repo", $"{discovered}");
+
+            string subDir = Path.Combine(mockRepo, "src", "sub");
+            Directory.CreateDirectory(subDir);
+            var subDiscovered = GitHubService.GetRepoInfo(subDir);
+            Check(subDiscovered == ("myorg", "myrepo"), "Subfolder inside git repo discovers parent repo info", $"{subDiscovered}");
+
+            // PR validation
+            var svc = new GitHubService();
+            var (sameBranchSuccess, sameBranchMsg, _) = await svc.CreatePullRequestAsync("myorg", "myrepo", "test pr", "main", "main");
+            Check(!sameBranchSuccess && sameBranchMsg.Contains("cannot be the same"), "PR creation rejects identical head and base branches", sameBranchMsg);
+
+            var (emptyTitleSuccess, emptyTitleMsg, _) = await svc.CreatePullRequestAsync("myorg", "myrepo", "", "feature", "main");
+            Check(!emptyTitleSuccess && emptyTitleMsg.Contains("empty"), "PR creation rejects empty title", emptyTitleMsg);
+
+            // Token resolution
+            Check(GitHubService.ResolveToken("explicit_pat_token") == "explicit_pat_token", "ResolveToken prioritizes explicit token");
+
+            // Model deserialization
+            string runJson = "{\"id\":12345,\"name\":\"CI\",\"head_branch\":\"main\",\"head_sha\":\"abcdef123456\",\"status\":\"completed\",\"conclusion\":\"failure\",\"display_title\":\"Fix compiler error\",\"html_url\":\"https://github.com/myorg/myrepo/actions/runs/12345\"}";
+            var run = System.Text.Json.JsonSerializer.Deserialize<GitHubWorkflowRun>(runJson);
+            Check(run != null && run.Id == 12345 && run.Conclusion == "failure" && run.DisplayTitle == "Fix compiler error", "GitHubWorkflowRun deserializes correctly", $"{run?.DisplayTitle}");
+
+            string jobJson = "{\"id\":99887,\"run_id\":12345,\"name\":\"build-and-test\",\"status\":\"completed\",\"conclusion\":\"failure\"}";
+            var job = System.Text.Json.JsonSerializer.Deserialize<GitHubJob>(jobJson);
+            Check(job != null && job.Id == 99887 && job.Conclusion == "failure", "GitHubJob deserializes correctly", $"{job?.Name}");
+
+            // Watcher lifecycle and repo setting
+            using (var watcher = new GitHubWatcher(svc))
+            {
+                bool failureFired = false;
+                bool successFired = false;
+                watcher.OnWorkflowFailed += (r, log) => failureFired = true;
+                watcher.OnWorkflowSucceeded += (r) => successFired = true;
+
+                Check(!failureFired && !successFired, "Watcher event handlers wired correctly");
+
+                watcher.SetActiveRepo(mockRepo);
+                Check(watcher.CurrentRepo == ("myorg", "myrepo"), "GitHubWatcher parses active repo", $"{watcher.CurrentRepo}");
+
+                // CheckNow on mock repo without crashing
+                await watcher.CheckNowAsync();
+                Check(true, "GitHubWatcher CheckNowAsync executes safely without throwing");
+            }
+            Check(true, "GitHubWatcher disposes cleanly");
+
+            // Edge cases testing
+            Console.WriteLine("\n== GitHub Assistant: edge cases");
+
+            // 1. Missing or non-existent repo directory
+            Check(GitHubService.GetRepoInfo(Path.Combine(work, "ghost_folder")) == null, "Non-existent directory returns null repo info");
+            string plainFolder = Path.Combine(work, "plain_folder");
+            Directory.CreateDirectory(plainFolder);
+            Check(GitHubService.GetRepoInfo(plainFolder) == null, "Folder without .git returns null repo info");
+
+            // 2. Repo with no remotes
+            string noRemoteRepo = Path.Combine(work, "no_remote_repo");
+            Directory.CreateDirectory(Path.Combine(noRemoteRepo, ".git"));
+            File.WriteAllText(Path.Combine(noRemoteRepo, ".git", "config"), "[core]\n\trepositoryformatversion = 0\n");
+            Check(GitHubService.GetRepoInfo(noRemoteRepo) == null, "Repo without remotes returns null repo info");
+
+            // 3. Repo with non-GitHub remote (e.g., GitLab)
+            string gitlabRepo = Path.Combine(work, "gitlab_repo");
+            Directory.CreateDirectory(Path.Combine(gitlabRepo, ".git"));
+            File.WriteAllText(Path.Combine(gitlabRepo, ".git", "config"), "[remote \"origin\"]\n\turl = git@gitlab.com:group/project.git\n");
+            Check(GitHubService.GetRepoInfo(gitlabRepo) == null, "Repo with GitLab remote returns null repo info");
+
+            // 4. Missing/invalid token handling
+            var (missingTokenSuccess, missingTokenMsg, _) = await svc.CreatePullRequestAsync("myorg", "myrepo", "feature", "head-branch", "main", token: "");
+            Check(!missingTokenSuccess && (missingTokenMsg.Contains("token") || missingTokenMsg.Contains("No GitHub token")),
+                  "PR creation with missing token fails gracefully", missingTokenMsg);
+
+            var (emptyHeadSuccess, emptyHeadMsg, _) = await svc.CreatePullRequestAsync("myorg", "myrepo", "feature", "", "main", token: "fake_token");
+            Check(!emptyHeadSuccess && emptyHeadMsg.Contains("empty"), "PR creation with empty head branch is rejected", emptyHeadMsg);
+
+            // 5. Watcher with no repo or non-GitHub repo
+            using (var unconfiguredWatcher = new GitHubWatcher(svc))
+            {
+                unconfiguredWatcher.SetActiveRepo(plainFolder);
+                Check(unconfiguredWatcher.CurrentRepo == null, "Watcher ignores folder without GitHub remote");
+                await unconfiguredWatcher.CheckNowAsync();
+                Check(true, "Watcher CheckNowAsync with unconfigured repo does not crash");
+            }
+
+            // 6. Graceful handling of empty or minimal workflow JSON responses
+            string emptyRunJson = "{\"id\":0,\"name\":\"\",\"status\":\"\"}";
+            var emptyRun = System.Text.Json.JsonSerializer.Deserialize<GitHubWorkflowRun>(emptyRunJson);
+            Check(emptyRun != null && emptyRun.Id == 0 && emptyRun.Conclusion == null, "Minimal GitHubWorkflowRun deserializes safely");
+
+            string emptyJobJson = "{\"id\":0,\"run_id\":0,\"name\":\"\",\"status\":\"\"}";
+            var emptyJob = System.Text.Json.JsonSerializer.Deserialize<GitHubJob>(emptyJobJson);
+            Check(emptyJob != null && emptyJob.Steps.Count == 0, "Minimal GitHubJob has initialized empty steps list");
         }
     }
 }

@@ -13,6 +13,8 @@
     <Compile Include="..\SlimeHelper\SlimeToolManager.cs" Link="App\SlimeToolManager.cs" />
     <Compile Include="..\SlimeHelper\SlimeBrainManager.cs" Link="App\SlimeBrainManager.cs" />
     <Compile Include="..\SlimeHelper\SlimeMemory.cs" Link="App\SlimeMemory.cs" />
+    <Compile Include="..\SlimeHelper\GitHubService.cs" Link="App\GitHubService.cs" />
+    <Compile Include="..\SlimeHelper\GitHubWatcher.cs" Link="App\GitHubWatcher.cs" />
   </ItemGroup>
 
 </Project>

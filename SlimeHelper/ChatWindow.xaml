@@ -324,6 +324,9 @@
                         <Button Content="📝 /todo" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/todo "/>
                         <Button Content="📁 /notes" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/notes"/>
                         <Button Content="🔗 /bind" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/bind "/>
+                        <Button Content="🐙 /gh status" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/gh status"/>
+                        <Button Content="🚀 /gh runs" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/gh runs"/>
+                        <Button Content="🔀 /pr" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/pr "/>
                     </StackPanel>
                 </ScrollViewer>
             </Border>
