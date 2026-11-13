@@ -183,13 +183,7 @@ namespace SlimeHelper
             }
 
             // Pass source "ChatWindow" to avoid duplicate user echo
-            _ = Task.Run(() =>
-            {
-                Dispatcher.Invoke(() =>
-                {
-                    _mainWindow.ProcessAiRequest(input, workingDir: workingDir, requestedThread: CurrentThread, source: "ChatWindow");
-                });
-            });
+            _mainWindow.ProcessAiRequest(input, workingDir: workingDir, requestedThread: CurrentThread, source: "ChatWindow");
         }
 
         private async Task HandleCommandAsync(string commandText)
@@ -271,9 +265,17 @@ namespace SlimeHelper
                         targetFolder = boundPath;
                     }
 
-                    string notesPath = Path.Combine(targetFolder, "slime_notes.md");
-                    File.AppendAllText(notesPath, $"- [ ] {task}\n");
-                    AddSystemMessage($"✔ Added to To-Do: \"{task}\" (in {Path.GetFileName(notesPath)})");
+                    try
+                    {
+                        string notesPath = Path.Combine(targetFolder, "slime_notes.md");
+                        NotesManager.EnsureNotesInGitignore(targetFolder);
+                        File.AppendAllText(notesPath, $"- [ ] {task}\n");
+                        AddSystemMessage($"✔ Added to To-Do: \"{task}\" (in {Path.GetFileName(notesPath)})");
+                    }
+                    catch (Exception ex)
+                    {
+                        AddSystemMessage($"❌ Could not save To-Do: {ex.Message}");
+                    }
                 }
                 else
                 {
@@ -347,15 +349,18 @@ namespace SlimeHelper
                 IsBusy = false;
                 StatusBanner.Visibility = Visibility.Collapsed;
 
-                Messages.Add(new ChatUiMessage
+                if (thread.Equals(CurrentThread, StringComparison.OrdinalIgnoreCase))
                 {
-                    Sender = "Slime",
-                    Text = response,
-                    IsUser = false,
-                    Timestamp = DateTime.Now.ToString("HH:mm")
-                });
+                    Messages.Add(new ChatUiMessage
+                    {
+                        Sender = "Slime",
+                        Text = response,
+                        IsUser = false,
+                        Timestamp = DateTime.Now.ToString("HH:mm")
+                    });
 
-                ScrollToBottom();
+                    ScrollToBottom();
+                }
             });
         }
 
@@ -406,7 +411,7 @@ namespace SlimeHelper
 
         private void ScrollToBottom()
         {
-            ChatScrollViewer?.ScrollToEnd();
+            Dispatcher.InvokeAsync(() => ChatScrollViewer?.ScrollToEnd(), System.Windows.Threading.DispatcherPriority.Loaded);
         }
 
         private void SendButton_Click(object sender, RoutedEventArgs e)
