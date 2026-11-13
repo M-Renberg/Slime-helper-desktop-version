@@ -8,6 +8,10 @@ namespace SlimeHelper
         {
             var sb = new StringBuilder();
 
+            // 0. Language Rule
+            sb.AppendLine("[Language Rule]");
+            sb.AppendLine("You are Slime, a desktop AI companion. You must ALWAYS respond in English. Regardless of whether the user addresses you in Swedish, English, or any other language, every reply, explanation, and message from you MUST be exclusively in English. Never reply in Swedish.\n");
+
             // 1. Obsidian: Relevanta sökresultat baserat på frågan
             var matchingNotes = ObsidianService.SearchVaultContent(settings.ObsidianVaultPath, userPrompt);
             if (matchingNotes.Count > 0)

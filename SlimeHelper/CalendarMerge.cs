@@ -85,11 +85,11 @@ namespace SlimeHelper
             }
             else if (local.Date == now.ToLocalTime().Date)
             {
-                text = $"{summary} kl {local:HH:mm}";
+                text = $"{summary} at {local:HH:mm}";
             }
             else
             {
-                text = $"{summary} {local:yyyy-MM-dd} kl {local:HH:mm}";
+                text = $"{summary} {local:yyyy-MM-dd} at {local:HH:mm}";
             }
 
             if (showCalendarName && !item.Calendar.IsPrimary && !string.IsNullOrWhiteSpace(item.Calendar.Name))

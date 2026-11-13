@@ -1197,6 +1197,9 @@ namespace SlimeHelper
                                             "Do NOT use LIST_FILES or SEARCH_FILES for this again.");
                 }
 
+                queryBuilder.AppendLine("\n[Language Requirement]");
+                queryBuilder.AppendLine("CRITICAL: You are Slime, an English-speaking AI desktop assistant. You must ALWAYS respond in English. Even if the user writes, asks, or prompts in Swedish or any other language, every response, explanation, and message from you MUST be exclusively in English. Never answer in Swedish.\n");
+
                 queryBuilder.AppendLine("\n[User Prompt]");
                 queryBuilder.AppendLine(prompt);
 
@@ -1276,6 +1279,7 @@ namespace SlimeHelper
                     loopBuilder.AppendLine(agentLog.ToString());
 
                     loopBuilder.AppendLine("[Instructions]");
+                    loopBuilder.AppendLine("- LANGUAGE: You must ALWAYS respond in English. Never reply in Swedish.");
                     if (SlimeToolManager.WriteFailureCount >= 3)
                     {
                         // Multiple edit failures occurred: instruct the model to stop retrying and report the issue to the user

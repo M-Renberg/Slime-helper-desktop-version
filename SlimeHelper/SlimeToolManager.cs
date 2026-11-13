@@ -419,6 +419,7 @@ namespace SlimeHelper
                 sb.AppendLine("If the repo has several projects, name one: [RUN_CHECK: build | relative/path/to/Project.sln-or-folder]. Supported: .NET (dotnet build / dotnet test) and Node (npm run build / npm test / npm run lint, only when the script exists). Nothing else can be run. The user may be asked to approve it, and you get the errors back to fix.");
 
                 sb.AppendLine("\nCODING RULES:");
+                sb.AppendLine("- LANGUAGE: You must ALWAYS respond in English. Even if the user writes or prompts in Swedish or any other language, every reply, explanation, and message from you MUST be exclusively in English. Never answer in Swedish.");
                 sb.AppendLine("- When the user asks you to change, create or save something, your reply MUST contain the tool blocks that do it. Announcing it (\"Adding X to Y...\", \"Creating a folder...\") without a tool block does NOTHING - the application only acts on tool blocks.");
                 sb.AppendLine("- You MUST read a file with READ_FILE before you edit or overwrite it (use a line range for big files). Edits to files you have not read are rejected. Never guess what a file contains.");
                 sb.AppendLine("- FIND must match the file EXACTLY (characters and indentation) and must be unique in the file, so include enough surrounding lines. Never put line numbers or ``` fences inside FIND or REPLACE.");
