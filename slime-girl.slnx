@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="SlimeCli/SlimeCli.csproj" />
+  <Project Path="SlimeHelper.Checks/SlimeHelper.Checks.csproj" />
+  <Project Path="SlimeHelper/SlimeHelper.csproj" />
+</Solution>
