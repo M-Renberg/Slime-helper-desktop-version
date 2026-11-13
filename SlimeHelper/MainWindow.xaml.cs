@@ -1033,11 +1033,13 @@ namespace SlimeHelper
                 }
 
                 string historyContext = _brainManager.GetHistoryContext(activeThread, 6);
+                string memoryContext = _brainManager.GetMemoryNetworkContext(prompt, activeThread);
                 var queryBuilder = new System.Text.StringBuilder();
 
-                if (!string.IsNullOrWhiteSpace(standardContext) || !string.IsNullOrWhiteSpace(tagContext))
+                if (!string.IsNullOrWhiteSpace(standardContext) || !string.IsNullOrWhiteSpace(tagContext) || !string.IsNullOrWhiteSpace(memoryContext))
                 {
                     queryBuilder.AppendLine("[System Context]");
+                    if (!string.IsNullOrWhiteSpace(memoryContext)) queryBuilder.AppendLine(memoryContext);
                     if (!string.IsNullOrWhiteSpace(standardContext)) queryBuilder.AppendLine(standardContext);
                     if (!string.IsNullOrWhiteSpace(tagContext)) queryBuilder.AppendLine(tagContext);
                 }

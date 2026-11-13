@@ -73,7 +73,7 @@ namespace SlimeHelper
 
         // Modellen härmar historikformatet ("System: ...", "Slime: ...") och hittar på egna turer.
         private static readonly Regex AppStatusLineRegex =
-            new(@"^[ \t]*\*\((?:utfört:|Jag |Bygger|⚠ Nothing was|(?=[^\r\n]*(?:📝|💻|🧠|🔒|❌|✏|📖|🔍|📂|🔨|🛠|this time))I(?: (?:saved|created|wrote|edited|tried|couldn't)|'m (?:reading|searching|looking|running|not allowed)))[^\r\n]*\)\*[ \t]*\r?$\n?", RegexOptions.Multiline);
+            new(@"^[ \t]*\*\((?:utfört:|Jag |Bygger|⚠ Nothing was|(?=[^\r\n]*(?:📝|💻|🧠|🔒|❌|✏|📖|🔍|📂|🔨|🛠|this time))I(?: (?:saved|created|wrote|edited|tried|couldn't|linked|recalled|forgot|searched|found)|'m (?:reading|searching|looking|running|not allowed)))[^\r\n]*\)\*[ \t]*\r?$\n?", RegexOptions.Multiline);
 
         /// <summary>
         /// Tar bort appens statusrader ("*(I edited X ✏️)*" och de gamla svenska varianterna) ur en text.
@@ -356,6 +356,14 @@ namespace SlimeHelper
             sb.AppendLine("[SAVE_NOTE: folder_name/filename.md]\n# content\n[/SAVE_NOTE]");
             sb.AppendLine("A request to remember or save something MUST contain a [SAVE_NOTE] block. Saying that you saved it without the block saves nothing.");
 
+            sb.AppendLine("\n1b. LOCAL MEMORY BANK & KNOWLEDGE NETWORK (SlimeBrain):");
+            sb.AppendLine("To store structured facts, user preferences, project decisions, or architectural rules in your interconnected memory network, use:");
+            sb.AppendLine("[REMEMBER: key | Category | #tag1, #tag2]\nfact or insight content\n[/REMEMBER]");
+            sb.AppendLine("Categories: Fact, UserPreference, ProjectDecision, Architecture, Concept, Rule (default is Fact).");
+            sb.AppendLine("To link memories in your knowledge network: [CONNECT_MEMORY: source_key -> relation -> target_key]");
+            sb.AppendLine("To search your memory network: [RECALL_MEMORY: query or #tag]");
+            sb.AppendLine("To remove an outdated memory: [FORGET_MEMORY: key]");
+
             if (!string.IsNullOrEmpty(targetRepoPath))
             {
                 sb.AppendLine($"\n2. WRITE DOCUMENTATION TO WORKSPACE ({targetRepoPath}):");
@@ -460,7 +468,7 @@ namespace SlimeHelper
         public static string ProcessResponse(string response, string activeThread, string targetRepoPath, SlimeBrainManager brainManager, out string followUpPrompt, out List<CheckRequest> checks)
         {
             string cleanResponse = response;
-            followUpPrompt = "";
+            string localFollowUp = "";
             checks = new List<CheckRequest>();
             int failuresBefore = WriteFailureCount;
 
@@ -472,6 +480,85 @@ namespace SlimeHelper
                 ModificationCount++;
                 return $"\n*(I saved the note: {filename} in my memory! 🧠)*\n";
             });
+
+            // Memory Bank Tool: REMEMBER
+            cleanResponse = ExtractAndExecute(cleanResponse, "[REMEMBER:", "[/REMEMBER]", (header, content) =>
+            {
+                var parts = header.Split('|', StringSplitOptions.TrimEntries);
+                string key = parts[0];
+                var category = MemoryCategory.Fact;
+                if (parts.Length > 1 && Enum.TryParse<MemoryCategory>(parts[1], true, out var parsedCat))
+                {
+                    category = parsedCat;
+                }
+                var tags = new List<string>();
+                if (parts.Length > 2)
+                {
+                    tags = parts[2].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+                }
+
+                string? repoTag = activeThread.StartsWith("#") ? activeThread : null;
+                var (ok, msg, node) = brainManager.RememberFact(key, content, category, tags, repoTag);
+                if (ok && node != null)
+                {
+                    ModificationCount++;
+                    return $"\n*(I saved this memory in my memory bank: {node.Key}! 🧠)*\n";
+                }
+                return $"\n*(I couldn't save memory '{key}': {msg} 🔒)*\n";
+            });
+
+            // Memory Bank Tool: CONNECT_MEMORY
+            cleanResponse = Regex.Replace(cleanResponse, @"\[CONNECT_MEMORY:\s*([^\]\->]+?)\s*->\s*([^\]\->]+?)\s*->\s*([^\]]+?)\]", m =>
+            {
+                string from = m.Groups[1].Value.Trim();
+                string rel = m.Groups[2].Value.Trim();
+                string to = m.Groups[3].Value.Trim();
+                var (ok, msg) = brainManager.ConnectMemories(from, to, rel);
+                if (ok)
+                {
+                    ModificationCount++;
+                    return $"\n*(I linked memories: {from} -> {rel} -> {to} in my memory network! 🧠)*\n";
+                }
+                return $"\n*(I couldn't link memories: {msg} 🔒)*\n";
+            }, RegexOptions.IgnoreCase);
+
+            // Memory Bank Tool: RECALL_MEMORY
+            cleanResponse = Regex.Replace(cleanResponse, @"\[RECALL_MEMORY:\s*([^\]]+?)\]", m =>
+            {
+                string query = m.Groups[1].Value.Trim();
+                string? repoTag = activeThread.StartsWith("#") ? activeThread : null;
+                var matches = brainManager.FindMemories(query, repoTag, 5);
+                if (matches.Count > 0)
+                {
+                    var sbRecall = new System.Text.StringBuilder();
+                    sbRecall.AppendLine($"\n[RECALLED MEMORIES FOR \"{query}\"]");
+                    foreach (var node in matches)
+                    {
+                        sbRecall.AppendLine($"- [{node.Category}] {node.Key}: {node.Content}");
+                        foreach (var r in node.Relations)
+                        {
+                            sbRecall.AppendLine($"  ↳ {r.RelationType} -> {r.TargetKey}");
+                        }
+                    }
+                    localFollowUp += sbRecall.ToString();
+                    return $"\n*(I recalled {matches.Count} related memories for '{query}' from my memory bank! 🧠)*\n";
+                }
+                localFollowUp += $"\n[RECALL_MEMORY: No memories found matching '{query}']\n";
+                return $"\n*(I found no memories matching '{query}' in my memory bank 🧠)*\n";
+            }, RegexOptions.IgnoreCase);
+
+            // Memory Bank Tool: FORGET_MEMORY
+            cleanResponse = Regex.Replace(cleanResponse, @"\[FORGET_MEMORY:\s*([^\]]+?)\]", m =>
+            {
+                string key = m.Groups[1].Value.Trim();
+                var (ok, msg) = brainManager.ForgetMemory(key);
+                if (ok)
+                {
+                    ModificationCount++;
+                    return $"\n*(I forgot memory '{key}' from my memory bank! 🧠)*\n";
+                }
+                return $"\n*(I couldn't forget memory '{key}': {msg} 🔒)*\n";
+            }, RegexOptions.IgnoreCase);
 
             if (!string.IsNullOrEmpty(targetRepoPath))
             {
@@ -505,22 +592,24 @@ namespace SlimeHelper
                 });
 
                 // Tool 5 (List files) - runs before READ_FILE so both can be used in the same response
-                cleanResponse = ProcessListFiles(cleanResponse, targetRepoPath, activeThread, ref followUpPrompt);
+                cleanResponse = ProcessListFiles(cleanResponse, targetRepoPath, activeThread, ref localFollowUp);
 
                 // Tool 6 (Search files by name and content)
-                cleanResponse = ProcessSearchFiles(cleanResponse, targetRepoPath, activeThread, ref followUpPrompt);
+                cleanResponse = ProcessSearchFiles(cleanResponse, targetRepoPath, activeThread, ref localFollowUp);
 
                 // Tool 4 (Read files) - runs before EDIT_FILE so reading and editing in the same response succeeds
-                cleanResponse = ProcessReadFiles(cleanResponse, targetRepoPath, activeThread, ref followUpPrompt);
+                cleanResponse = ProcessReadFiles(cleanResponse, targetRepoPath, activeThread, ref localFollowUp);
 
                 // Tool 7 (Edit existing file with FIND/REPLACE)
-                cleanResponse = ProcessEditFiles(cleanResponse, targetRepoPath, activeThread, brainManager, ref followUpPrompt);
+                cleanResponse = ProcessEditFiles(cleanResponse, targetRepoPath, activeThread, brainManager, ref localFollowUp);
 
                 // Tool 8 (Build/test/lint) - run asynchronously by caller, only tags read here
                 // If an edit failed in this response, disk code is not what was intended: do not build it
                 bool editFailedHere = WriteFailureCount > failuresBefore;
                 cleanResponse = ProcessCheckTags(cleanResponse, checks, editFailedHere);
             }
+
+            followUpPrompt = localFollowUp;
 
             // Allt appen själv skrev i det här svaret (modellens egna påhitt är redan bortrensade) sparas i händelsekedjan
             foreach (Match m in AppStatusLineRegex.Matches(cleanResponse)) AddActivity(m.Value);

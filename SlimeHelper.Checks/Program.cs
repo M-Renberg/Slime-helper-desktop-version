@@ -52,6 +52,7 @@ namespace SlimeHelper.Checks
 
                 BrainTests(brain, work);
                 MemoryTests(brain, work, brainRoot);
+                MemoryNetworkTests(brain, work, brainRoot);
                 HistoryTests(brain, work, brainRoot);
                 ClaimTests(brain, work);
                 EditAndFileTests(brain, work, brainRoot);
@@ -132,6 +133,66 @@ namespace SlimeHelper.Checks
             string outside = Path.Combine(work, "outside.md");
             ui = Save("#pfx", outside);
             Check(!File.Exists(outside), "an absolute path outside the brain is never written", ui);
+        }
+
+        // ------------------------------------------------------------------ memory bank & network
+        static void MemoryNetworkTests(SlimeBrainManager brain, string work, string brainRoot)
+        {
+            Console.WriteLine("\n== Memory Bank: REMEMBER, CONNECT_MEMORY, RECALL_MEMORY, FORGET_MEMORY");
+
+            string repo = Path.Combine(work, "memnet");
+            Directory.CreateDirectory(repo);
+            brain.BindRepo("nettest", repo);
+
+            // 1. REMEMBER tool
+            SlimeToolManager.ResetModificationCount();
+            string remResp = "[REMEMBER: code_formatting | UserPreference | #csharp, #formatting]\nAlways format code using 4 spaces indentation.\n[/REMEMBER]";
+            string ui = SlimeToolManager.ProcessResponse(remResp, "#nettest", repo, brain, out string follow, out _);
+            Check(ui.Contains("I saved this memory in my memory bank: code_formatting"), "REMEMBER tool succeeds and returns status line", ui);
+            Check(SlimeToolManager.ModificationCount == 1, "saving a structured memory increments ModificationCount");
+
+            string bankFile = Path.Combine(brainRoot, "memory", "memory_bank.json");
+            Check(File.Exists(bankFile), "memory_bank.json was written to brain memory folder");
+
+            var mem = brain.LoadMemory();
+            var node = mem.GetNode("code_formatting");
+            Check(node != null && node.Category == MemoryCategory.UserPreference && node.Tags.Contains("#csharp"), "node is saved with correct category and tags");
+
+            // 2. Second node and CONNECT_MEMORY tool
+            string secondNode = "[REMEMBER: compiler_target | Architecture | #dotnet]\nTarget framework is .NET 10.\n[/REMEMBER]";
+            SlimeToolManager.ProcessResponse(secondNode, "#nettest", repo, brain, out _, out _);
+
+            string connectResp = "[CONNECT_MEMORY: code_formatting -> relates_to -> compiler_target]";
+            ui = SlimeToolManager.ProcessResponse(connectResp, "#nettest", repo, brain, out _, out _);
+            Check(ui.Contains("I linked memories: code_formatting -> relates_to -> compiler_target"), "CONNECT_MEMORY tool connects nodes", ui);
+
+            mem = brain.LoadMemory();
+            node = mem.GetNode("code_formatting");
+            Check(node != null && node.Relations.Any(r => r.TargetKey == "compiler_target" && r.RelationType == "relates_to"), "relation edge exists in memory network");
+
+            // 3. RECALL_MEMORY tool
+            string recallResp = "[RECALL_MEMORY: csharp]";
+            ui = SlimeToolManager.ProcessResponse(recallResp, "#nettest", repo, brain, out follow, out _);
+            Check(ui.Contains("I recalled") && ui.Contains("related memories for 'csharp'"), "RECALL_MEMORY returns recall status line", ui);
+            Check(follow.Contains("RECALLED MEMORIES") && follow.Contains("code_formatting") && follow.Contains("↳ relates_to -> compiler_target"), "RECALL_MEMORY populates followUpPrompt with network context", follow);
+
+            // 4. Memory Network Context builder
+            string context = brain.GetMemoryNetworkContext("What is the code style for C#?", "#nettest");
+            Check(context.Contains("[Slime Memory Bank]") && context.Contains("code_formatting") && context.Contains("compiler_target"), "GetMemoryNetworkContext extracts relevant nodes and relations");
+
+            // 5. Status line stripping
+            string stripped = SlimeToolManager.RemoveStatusLines("*(I saved this memory in my memory bank: test! 🧠)*\n*(I linked memories: a -> b -> c! 🧠)*\nHello Master");
+            Check(stripped == "Hello Master", "memory bank status lines are cleanly stripped by RemoveStatusLines", stripped);
+
+            // 6. FORGET_MEMORY tool
+            SlimeToolManager.ResetModificationCount();
+            string forgetResp = "[FORGET_MEMORY: code_formatting]";
+            ui = SlimeToolManager.ProcessResponse(forgetResp, "#nettest", repo, brain, out _, out _);
+            Check(ui.Contains("I forgot memory 'code_formatting'"), "FORGET_MEMORY removes node", ui);
+            Check(SlimeToolManager.ModificationCount == 1, "forgetting a memory increments ModificationCount");
+
+            mem = brain.LoadMemory();
+            Check(mem.GetNode("code_formatting") == null, "forgotten node no longer exists in memory bank");
         }
 
         // ------------------------------------------------------------------ history hygiene

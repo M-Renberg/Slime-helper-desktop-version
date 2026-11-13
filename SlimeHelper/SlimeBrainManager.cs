@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Text.Json;
 
 namespace SlimeHelper
@@ -18,6 +18,7 @@ namespace SlimeHelper
         private string _subjectsFolder = ""; // FIX 1: Lade till variabeln här!
         private string _profilePath = "";
         private string _historyPath = "";
+        private string _memoryBankPath = "";
 
         private Dictionary<string, List<SlimeMemoryMessage>> _chatHistory = new();
 
@@ -107,6 +108,7 @@ namespace SlimeHelper
 
             _profilePath = Path.Combine(_userFolder, "profile.json");
             _historyPath = Path.Combine(_memoryFolder, "chat_history.json");
+            _memoryBankPath = Path.Combine(_memoryFolder, "memory_bank.json");
         }
 
         private void InitializeBrain()
@@ -121,9 +123,15 @@ namespace SlimeHelper
                 File.WriteAllText(RepoMapPath, "{}");
             }
 
-            if (!File.Exists(_profilePath))
+            if (!File.Exists(_memoryBankPath) && !File.Exists(_profilePath))
             {
                 SaveMemory(new SlimeMemory());
+            }
+            else if (!File.Exists(_memoryBankPath) && File.Exists(_profilePath))
+            {
+                // Migrate profile.json to memory_bank.json
+                var mem = LoadMemory();
+                SaveMemory(mem);
             }
         }
 
@@ -458,10 +466,24 @@ namespace SlimeHelper
         {
             try
             {
+                if (File.Exists(_memoryBankPath))
+                {
+                    string json = File.ReadAllText(_memoryBankPath);
+                    return JsonSerializer.Deserialize<SlimeMemory>(json, ReadOptions) ?? new SlimeMemory();
+                }
+
                 if (File.Exists(_profilePath))
                 {
                     string json = File.ReadAllText(_profilePath);
-                    return JsonSerializer.Deserialize<SlimeMemory>(json) ?? new SlimeMemory();
+                    return JsonSerializer.Deserialize<SlimeMemory>(json, ReadOptions) ?? new SlimeMemory();
+                }
+
+                // Check temp memory if migration needed
+                string tempMem = Path.Combine(Path.GetTempPath(), "slime_memory.json");
+                if (File.Exists(tempMem))
+                {
+                    string json = File.ReadAllText(tempMem);
+                    return JsonSerializer.Deserialize<SlimeMemory>(json, ReadOptions) ?? new SlimeMemory();
                 }
             }
             catch { }
@@ -473,9 +495,168 @@ namespace SlimeHelper
             try
             {
                 string json = JsonSerializer.Serialize(memory, JsonOptions);
+                File.WriteAllText(_memoryBankPath, json);
                 File.WriteAllText(_profilePath, json);
             }
             catch { }
+        }
+
+        /// <summary>
+        /// Saves or updates a memory node in Slime's memory network.
+        /// </summary>
+        public (bool Success, string Message, MemoryNode? Node) RememberFact(
+            string key,
+            string content,
+            MemoryCategory category = MemoryCategory.Fact,
+            List<string>? tags = null,
+            string? repoTag = null,
+            int importance = 3)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(content))
+                {
+                    return (false, "Key and content cannot be empty", null);
+                }
+
+                var memory = LoadMemory();
+                var node = new MemoryNode
+                {
+                    Key = key.Trim(),
+                    Content = content.Trim(),
+                    Category = category,
+                    Tags = tags ?? new List<string>(),
+                    RelatedRepoOrTag = string.IsNullOrWhiteSpace(repoTag) ? null : NormalizeTag(repoTag),
+                    Importance = Math.Clamp(importance, 1, 5)
+                };
+
+                var saved = memory.AddOrUpdateNode(node);
+                SaveMemory(memory);
+                return (true, $"Remembered '{saved.Key}'", saved);
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.Message, null);
+            }
+        }
+
+        /// <summary>
+        /// Connects two memory nodes with a directed relation edge.
+        /// </summary>
+        public (bool Success, string Message) ConnectMemories(string fromKey, string toKey, string relationType = "relates_to")
+        {
+            try
+            {
+                var memory = LoadMemory();
+                bool ok = memory.ConnectNodes(fromKey, toKey, relationType);
+                if (ok)
+                {
+                    SaveMemory(memory);
+                    return (true, $"Connected {fromKey} -> {relationType} -> {toKey}");
+                }
+                return (false, $"Could not connect nodes (one or both keys may not exist: '{fromKey}', '{toKey}')");
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Forgets/removes a memory node from the memory network.
+        /// </summary>
+        public (bool Success, string Message) ForgetMemory(string key)
+        {
+            try
+            {
+                var memory = LoadMemory();
+                bool ok = memory.RemoveNode(key);
+                if (ok)
+                {
+                    SaveMemory(memory);
+                    return (true, $"Forgot memory '{key}'");
+                }
+                return (false, $"Memory '{key}' was not found");
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Searches the memory network for relevant nodes.
+        /// </summary>
+        public List<MemoryNode> FindMemories(string query, string? repoTag = null, int limit = 5)
+        {
+            var memory = LoadMemory();
+            return memory.SearchNodes(query, repoTag, limit);
+        }
+
+        /// <summary>
+        /// Generates a structured context block representing relevant memories and their network connections for a prompt.
+        /// </summary>
+        public string GetMemoryNetworkContext(string prompt, string? activeThread = null, int limit = 5)
+        {
+            var memory = LoadMemory();
+            if (memory.Nodes.Count == 0 && memory.Facts.Count == 0) return "";
+
+            string? repoTag = !string.IsNullOrWhiteSpace(activeThread) && activeThread.StartsWith("#") ? activeThread : null;
+            var relevantNodes = memory.SearchNodes(prompt, repoTag, limit);
+
+            if (relevantNodes.Count == 0)
+            {
+                relevantNodes = memory.Nodes
+                    .Where(n => n.Importance >= 4 || (repoTag != null && string.Equals(n.RelatedRepoOrTag, NormalizeTag(repoTag), StringComparison.OrdinalIgnoreCase)))
+                    .OrderByDescending(n => n.Importance)
+                    .Take(3)
+                    .ToList();
+            }
+
+            if (relevantNodes.Count == 0 && memory.Facts.Count == 0) return "";
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("[Slime Memory Bank]");
+
+            if (!string.IsNullOrWhiteSpace(memory.UserName) && memory.UserName != "Master")
+            {
+                sb.AppendLine($"User Name: {memory.UserName}");
+            }
+
+            var printedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var node in relevantNodes)
+            {
+                printedKeys.Add(node.Key);
+                string tagStr = node.Tags.Count > 0 ? $" (Tags: {string.Join(", ", node.Tags)})" : "";
+                string repoStr = !string.IsNullOrEmpty(node.RelatedRepoOrTag) ? $" [{node.RelatedRepoOrTag}]" : "";
+                sb.AppendLine($"- [{node.Category}]{repoStr} {node.Key}: {node.Content}{tagStr}");
+
+                foreach (var rel in node.Relations)
+                {
+                    var target = memory.Nodes.FirstOrDefault(n => string.Equals(n.Key, rel.TargetKey, StringComparison.OrdinalIgnoreCase));
+                    if (target != null)
+                    {
+                        sb.AppendLine($"  ↳ {rel.RelationType} -> {target.Key}: {target.Content}");
+                        printedKeys.Add(target.Key);
+                    }
+                    else
+                    {
+                        sb.AppendLine($"  ↳ {rel.RelationType} -> {rel.TargetKey}");
+                    }
+                }
+            }
+
+            var remainingFacts = memory.Facts.Where(f => !relevantNodes.Any(n => n.Content == f)).Take(3).ToList();
+            if (remainingFacts.Count > 0)
+            {
+                foreach (var f in remainingFacts)
+                {
+                    sb.AppendLine($"- [Fact] {f}");
+                }
+            }
+
+            return sb.ToString().TrimEnd();
         }
     }
 }

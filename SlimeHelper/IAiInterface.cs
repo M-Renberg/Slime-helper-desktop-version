@@ -21,15 +21,84 @@ namespace SlimeHelper
         Task<string> GetResponseAsync(string prompt, string apiKey);
     }
 
+    internal static class AiMemoryStorage
+    {
+        public static readonly JsonSerializerOptions JsonIndentOptions = new() { WriteIndented = true };
+
+        public static string ResolveMemoryPath()
+        {
+            try
+            {
+                string settingsPath = Path.Combine(Path.GetTempPath(), "slime_settings.json");
+                if (File.Exists(settingsPath))
+                {
+                    var jsonDoc = JsonDocument.Parse(File.ReadAllText(settingsPath));
+                    if (jsonDoc.RootElement.TryGetProperty("ObsidianVaultPath", out var obsProp))
+                    {
+                        string obsPath = obsProp.GetString() ?? "";
+                        if (!string.IsNullOrWhiteSpace(obsPath) && Directory.Exists(obsPath))
+                        {
+                            string obsBrain = Path.Combine(obsPath, "SlimeBrain", "memory", "memory_bank.json");
+                            if (File.Exists(obsBrain)) return obsBrain;
+                        }
+                    }
+                }
+
+                string baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                string brainPath = Path.Combine(baseDir, "SlimeHelper", "SlimeBrain", "memory", "memory_bank.json");
+                if (File.Exists(brainPath)) return brainPath;
+            }
+            catch { }
+
+            return Path.Combine(Path.GetTempPath(), "slime_memory.json");
+        }
+
+        public static SlimeMemory Load()
+        {
+            string path = ResolveMemoryPath();
+            if (File.Exists(path))
+            {
+                try
+                {
+                    string json = File.ReadAllText(path);
+                    return JsonSerializer.Deserialize<SlimeMemory>(json) ?? new SlimeMemory();
+                }
+                catch { }
+            }
+            return new SlimeMemory();
+        }
+
+        public static void Save(SlimeMemory memory)
+        {
+            try
+            {
+                string json = JsonSerializer.Serialize(memory, JsonIndentOptions);
+                string mainPath = ResolveMemoryPath();
+                string? dir = Path.GetDirectoryName(mainPath);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(mainPath, json);
+
+                // Keep temp copy in sync as fallback
+                string tempPath = Path.Combine(Path.GetTempPath(), "slime_memory.json");
+                if (!string.Equals(mainPath, tempPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    File.WriteAllText(tempPath, json);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Save error: " + ex.Message);
+            }
+        }
+    }
+
     public class GeminiProvider : IAiProvider
     {
-        private static readonly JsonSerializerOptions JsonIndentOptions = new() { WriteIndented = true };
-        private static readonly string MemoryFilePath = Path.Combine(Path.GetTempPath(), "slime_memory.json");
         private static SlimeMemory _memory = new();
 
         public GeminiProvider()
         {
-            LoadMemory();
+            _memory = AiMemoryStorage.Load();
         }
 
         public async Task<string> GetResponseAsync(string prompt, string apiKey)
@@ -37,20 +106,24 @@ namespace SlimeHelper
             if (prompt.StartsWith("remember that ", StringComparison.OrdinalIgnoreCase))
             {
                 string fact = prompt[14..].Trim();
-                if (!_memory.Facts.Contains(fact))
+                _memory.AddOrUpdateNode(new MemoryNode
                 {
-                    _memory.Facts.Add(fact);
-                    SaveMemory();
-                }
+                    Key = "fact_" + Guid.NewGuid().ToString("N")[..6],
+                    Content = fact,
+                    Category = MemoryCategory.Fact,
+                    Importance = 3
+                });
+                AiMemoryStorage.Save(_memory);
                 return $"I'll keep that in my slime-core: '{fact}' ✨";
             }
 
             using var client = new HttpClient();
             var url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={apiKey}";
 
-            string factsString = string.Join(", ", _memory.Facts);
+            string factsString = _memory.Facts.Count > 0 ? string.Join(", ", _memory.Facts.TakeLast(10)) : "";
             string dynamicInstruction = $"You are a sassy anime slime assistant. User: {_memory.UserName}. " +
-                                         $"Project: {_memory.CurrentProject}. Facts: {factsString}";
+                                         $"Project: {_memory.CurrentProject}." +
+                                         (!string.IsNullOrEmpty(factsString) ? $" Facts: {factsString}" : "");
 
             var newUserMessage = new ChatMessage
             {
@@ -106,42 +179,17 @@ namespace SlimeHelper
             }
         }
 
-        private static void LoadMemory()
-        {
-            if (File.Exists(MemoryFilePath))
-            {
-                try
-                {
-                    string json = File.ReadAllText(MemoryFilePath);
-                    _memory = JsonSerializer.Deserialize<SlimeMemory>(json) ?? new SlimeMemory();
-                }
-                catch { _memory = new SlimeMemory(); }
-            }
-        }
-
-        private static void SaveMemory()
-        {
-            try
-            {
-                string json = JsonSerializer.Serialize(_memory, JsonIndentOptions);
-                File.WriteAllText(MemoryFilePath, json);
-            }
-            catch (Exception ex) { Console.WriteLine("Save error: " + ex.Message); }
-        }
-
         public static List<ChatMessage> GetHistory() => [];
     }
 
     // Claude Provider
     public class ClaudeProvider : IAiProvider
     {
-        private static readonly JsonSerializerOptions JsonIndentOptions = new() { WriteIndented = true };
-        private static readonly string MemoryFilePath = Path.Combine(Path.GetTempPath(), "slime_memory.json");
         private static SlimeMemory _memory = new();
 
         public ClaudeProvider()
         {
-            LoadMemory();
+            _memory = AiMemoryStorage.Load();
         }
 
         public async Task<string> GetResponseAsync(string prompt, string apiKey)
@@ -149,20 +197,24 @@ namespace SlimeHelper
             if (prompt.StartsWith("remember that ", StringComparison.OrdinalIgnoreCase))
             {
                 string fact = prompt[14..].Trim();
-                if (!_memory.Facts.Contains(fact))
+                _memory.AddOrUpdateNode(new MemoryNode
                 {
-                    _memory.Facts.Add(fact);
-                    SaveMemory();
-                }
+                    Key = "fact_" + Guid.NewGuid().ToString("N")[..6],
+                    Content = fact,
+                    Category = MemoryCategory.Fact,
+                    Importance = 3
+                });
+                AiMemoryStorage.Save(_memory);
                 return $"I'll keep that in my slime-core: '{fact}' ✨";
             }
 
             using var client = new HttpClient();
             var url = "https://api.anthropic.com/v1/messages";
 
-            string factsString = string.Join(", ", _memory.Facts);
+            string factsString = _memory.Facts.Count > 0 ? string.Join(", ", _memory.Facts.TakeLast(10)) : "";
             string dynamicInstruction = $"You are a sassy anime slime assistant. User: {_memory.UserName}. " +
-                                         $"Project: {_memory.CurrentProject}. Facts: {factsString}";
+                                         $"Project: {_memory.CurrentProject}." +
+                                         (!string.IsNullOrEmpty(factsString) ? $" Facts: {factsString}" : "");
 
             client.DefaultRequestHeaders.Add("x-api-key", apiKey);
             client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
@@ -212,29 +264,6 @@ namespace SlimeHelper
             {
                 return $"I received a weird response I couldn't parse. Error: {ex.Message}";
             }
-        }
-
-        private static void LoadMemory()
-        {
-            if (File.Exists(MemoryFilePath))
-            {
-                try
-                {
-                    string json = File.ReadAllText(MemoryFilePath);
-                    _memory = JsonSerializer.Deserialize<SlimeMemory>(json) ?? new SlimeMemory();
-                }
-                catch { _memory = new SlimeMemory(); }
-            }
-        }
-
-        private static void SaveMemory()
-        {
-            try
-            {
-                string json = JsonSerializer.Serialize(_memory, JsonIndentOptions);
-                File.WriteAllText(MemoryFilePath, json);
-            }
-            catch (Exception ex) { Console.WriteLine("Save error: " + ex.Message); }
         }
 
         public static List<ChatMessage> GetHistory() => [];
