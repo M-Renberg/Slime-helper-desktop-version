@@ -204,6 +204,28 @@ namespace SlimeHelper
             return sb.ToString().Trim();
         }
 
+        public IReadOnlyList<SlimeMemoryMessage> GetHistoryMessages(string threadId)
+        {
+            if (_chatHistory.TryGetValue(threadId, out var list))
+            {
+                return list.ToList();
+            }
+            return Array.Empty<SlimeMemoryMessage>();
+        }
+
+        public Dictionary<string, string> GetBoundRepos() => LoadRepoMap();
+
+        public List<string> GetAllThreads()
+        {
+            var threads = new HashSet<string>(_chatHistory.Keys, StringComparer.OrdinalIgnoreCase);
+            threads.Add("General");
+            foreach (var tag in LoadRepoMap().Keys)
+            {
+                threads.Add(tag);
+            }
+            return threads.OrderBy(t => t.Equals("General", StringComparison.OrdinalIgnoreCase) ? "0" : t).ToList();
+        }
+
         // --- REPO & FAKTA-HANTERING ---
 
         /// <summary>Gör om "Test", "#Test" och " #test " till "#test".</summary>

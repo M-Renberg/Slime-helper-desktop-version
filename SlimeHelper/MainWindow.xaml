@@ -1,4 +1,4 @@
-﻿<Window x:Class="SlimeHelper.MainWindow"
+<Window x:Class="SlimeHelper.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="SlimeHelper" Height="450" Width="250"
@@ -17,6 +17,14 @@
             BorderThickness="1px"
             Opacity="0.9"
             IsHitTestVisible="True">
+            <MenuItem Header="Chat with Slime" Click="OnOpenChatClick">
+                <MenuItem.Icon>
+                    <TextBlock Text="💬"/>
+                </MenuItem.Icon>
+            </MenuItem>
+
+            <Separator/>
+
             <MenuItem Header="Volume">
                 <MenuItem.Icon>
                 <TextBlock Text="🔊"/>
@@ -140,6 +148,9 @@
         HorizontalAlignment="Center"
         VerticalAlignment="Bottom"
         IsHitTestVisible="True"
+        Cursor="Hand"
+        ToolTip="Click to open Chat"
+        MouseLeftButtonUp="SpeechBubble_MouseLeftButtonUp"
         MouseEnter="SpeechBubble_MouseEnter"
         MouseLeave="SpeechBubble_MouseLeave">
             <Border.Effect>

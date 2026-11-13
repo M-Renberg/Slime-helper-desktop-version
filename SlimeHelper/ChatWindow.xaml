@@ -1,0 +1,419 @@
+<Window x:Class="SlimeHelper.ChatWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:SlimeHelper"
+        Title="Slime Assistant"
+        Height="620" Width="480"
+        MinWidth="380" MinHeight="450"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        WindowStartupLocation="CenterScreen">
+
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="42"
+                      ResizeBorderThickness="6"
+                      CornerRadius="12"
+                      GlassFrameThickness="0"/>
+    </WindowChrome.WindowChrome>
+
+    <Window.Resources>
+        <!-- Custom scrollbar style for chat -->
+        <Style x:Key="ChatScrollBarThumb" TargetType="{x:Type Thumb}">
+            <Setter Property="OverridesDefaultStyle" Value="true"/>
+            <Setter Property="IsTabStop" Value="false"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Thumb}">
+                        <Rectangle Fill="#3F445B" RadiusX="3" RadiusY="3" Width="6"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="{x:Type ScrollBar}">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Width" Value="8"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ScrollBar}">
+                        <Track x:Name="PART_Track" IsDirectionReversed="true">
+                            <Track.Thumb>
+                                <Thumb Style="{StaticResource ChatScrollBarThumb}"/>
+                            </Track.Thumb>
+                        </Track>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Pill Button Style -->
+        <Style x:Key="PillButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="#25293A"/>
+            <Setter Property="Foreground" Value="#9BA3B8"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="8,3"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="BorderBrush" Value="#32374E"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="10"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#31374E"/>
+                    <Setter Property="Foreground" Value="#E2E8F0"/>
+                    <Setter Property="BorderBrush" Value="#4B5578"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Window Control Button -->
+        <Style x:Key="WindowBtnStyle" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#A0A8BF"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Width" Value="32"/>
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                CornerRadius="6"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#31364B"/>
+                    <Setter Property="Foreground" Value="#FFFFFF"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
+    <!-- Main Container with rounded border & shadow -->
+    <Border Background="#161722"
+            BorderBrush="#2C3044"
+            BorderThickness="1"
+            CornerRadius="12">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="20" ShadowDepth="4" Direction="270" Opacity="0.55" Color="#000000"/>
+        </Border.Effect>
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="46"/> <!-- Title Bar -->
+                <RowDefinition Height="Auto"/> <!-- Thread Selector & Info -->
+                <RowDefinition Height="*"/> <!-- Chat History -->
+                <RowDefinition Height="Auto"/> <!-- Status / Thinking indicator -->
+                <RowDefinition Height="Auto"/> <!-- Quick Action Chips -->
+                <RowDefinition Height="Auto"/> <!-- Input Area -->
+            </Grid.RowDefinitions>
+
+            <!-- 1. Custom Title Bar -->
+            <Border Grid.Row="0"
+                    Background="#1E202E"
+                    CornerRadius="12,12,0,0"
+                    BorderBrush="#2C3044"
+                    BorderThickness="0,0,0,1">
+                <Grid Margin="12,0,8,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Icon & Title -->
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="🟢" FontSize="15" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Slime Assistant"
+                                   FontSize="13"
+                                   FontWeight="Bold"
+                                   Foreground="#F0F2F8"
+                                   VerticalAlignment="Center"/>
+                    </StackPanel>
+
+                    <!-- Empty space for window dragging (handled by WindowChrome) -->
+                    <Grid Grid.Column="1"/>
+
+                    <!-- Window Action Buttons -->
+                    <StackPanel Grid.Column="2"
+                                Orientation="Horizontal"
+                                VerticalAlignment="Center"
+                                WindowChrome.IsHitTestVisibleInChrome="True">
+                        <!-- Pin Button -->
+                        <Button x:Name="PinButton"
+                                Style="{StaticResource WindowBtnStyle}"
+                                Click="PinButton_Click"
+                                ToolTip="Toggle Always on Top"
+                                Content="📌"
+                                Margin="0,0,2,0"/>
+                        <!-- Minimize Button -->
+                        <Button x:Name="MinimizeButton"
+                                Style="{StaticResource WindowBtnStyle}"
+                                Click="MinimizeButton_Click"
+                                Content="—"
+                                Margin="0,0,2,0"/>
+                        <!-- Close Button -->
+                        <Button x:Name="CloseButton"
+                                Style="{StaticResource WindowBtnStyle}"
+                                Click="CloseButton_Click"
+                                Content="✕"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- 2. Sub-Header: Thread / Workspace Selector -->
+            <Border Grid.Row="1"
+                    Background="#191B26"
+                    Padding="14,6"
+                    BorderBrush="#252839"
+                    BorderThickness="0,0,0,1">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="🧠 Context:"
+                                   FontSize="11"
+                                   FontWeight="SemiBold"
+                                   Foreground="#7E879E"
+                                   Margin="0,0,6,0"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox x:Name="ThreadComboBox"
+                                  Width="140"
+                                  Height="24"
+                                  FontSize="11"
+                                  Background="#242738"
+                                  Foreground="#E2E8F0"
+                                  BorderBrush="#383D56"
+                                  SelectionChanged="ThreadComboBox_SelectionChanged"/>
+                    </StackPanel>
+
+                    <TextBlock x:Name="RepoPathHint"
+                               Grid.Column="1"
+                               Text=""
+                               FontSize="10"
+                               Foreground="#5C647C"
+                               VerticalAlignment="Center"
+                               HorizontalAlignment="Left"
+                               Margin="10,0,0,0"
+                               TextTrimming="CharacterEllipsis"/>
+
+                    <Button Grid.Column="2"
+                            Content="Clear Chat"
+                            Style="{StaticResource PillButtonStyle}"
+                            Click="ClearChat_Click"
+                            Margin="0"
+                            Padding="6,2"
+                            ToolTip="Clear message view (history remains in brain)"/>
+                </Grid>
+            </Border>
+
+            <!-- 3. Chat Messages List -->
+            <ScrollViewer Grid.Row="2"
+                          x:Name="ChatScrollViewer"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled"
+                          Padding="12,10">
+                <ItemsControl x:Name="ChatItemsControl" ItemsSource="{Binding Messages}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="{x:Type local:ChatUiMessage}">
+                            <Grid HorizontalAlignment="{Binding Alignment}" Margin="{Binding Margin}">
+                                <Border Background="{Binding BubbleBackground}"
+                                        BorderBrush="#383E54"
+                                        BorderThickness="1"
+                                        CornerRadius="12"
+                                        Padding="12,8"
+                                        MaxWidth="400">
+                                    <Border.Effect>
+                                        <DropShadowEffect BlurRadius="8" ShadowDepth="2" Direction="270" Opacity="0.15" Color="#000000"/>
+                                    </Border.Effect>
+
+                                    <StackPanel>
+                                        <!-- Header: Sender and Time -->
+                                        <Grid Margin="0,0,0,4">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+
+                                            <TextBlock Grid.Column="0"
+                                                       Text="{Binding Sender}"
+                                                       FontSize="11"
+                                                       FontWeight="Bold"
+                                                       Foreground="#A6B0C7"/>
+
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{Binding Timestamp}"
+                                                       FontSize="10"
+                                                       Foreground="#6B7280"
+                                                       Margin="8,0,0,0"/>
+                                        </Grid>
+
+                                        <!-- Message Content (Selectable) -->
+                                        <TextBox Text="{Binding Text, Mode=OneWay}"
+                                                 Foreground="{Binding TextColor}"
+                                                 FontSize="13"
+                                                 FontFamily="Segoe UI"
+                                                 IsReadOnly="True"
+                                                 TextWrapping="Wrap"
+                                                 Background="Transparent"
+                                                 BorderThickness="0"
+                                                 Padding="0"
+                                                 Cursor="Arrow"/>
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+
+            <!-- 4. Thinking / Status Banner -->
+            <Border Grid.Row="3"
+                    x:Name="StatusBanner"
+                    Background="#1E2333"
+                    BorderBrush="#363C52"
+                    BorderThickness="0,1,0,0"
+                    Padding="12,6"
+                    Visibility="Collapsed">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="💭" FontSize="13" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="StatusTextBlock"
+                               Text="Slime is thinking..."
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               Foreground="#82AAFF"
+                               VerticalAlignment="Center"/>
+                </StackPanel>
+            </Border>
+
+            <!-- 5. Quick Command Chips -->
+            <Border Grid.Row="4"
+                    Background="#191B26"
+                    Padding="12,4,12,6"
+                    BorderBrush="#252839"
+                    BorderThickness="0,1,0,0">
+                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                    <StackPanel Orientation="Horizontal">
+                        <Button Content="❓ /help" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/help"/>
+                        <Button Content="🎨 /skin" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/skin "/>
+                        <Button Content="📅 /cal" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/cal "/>
+                        <Button Content="📝 /todo" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/todo "/>
+                        <Button Content="📁 /notes" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/notes"/>
+                        <Button Content="🔗 /bind" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/bind "/>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+
+            <!-- 6. Input Bar -->
+            <Border Grid.Row="5"
+                    Background="#1E202E"
+                    CornerRadius="0,0,12,12"
+                    BorderBrush="#2C3044"
+                    BorderThickness="0,1,0,0"
+                    Padding="12,10">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Text input -->
+                    <Border Grid.Column="0"
+                            Background="#14151E"
+                            BorderBrush="#383D56"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="8,4">
+                        <Grid>
+                            <!-- Watermark / Placeholder -->
+                            <TextBlock x:Name="PlaceholderText"
+                                       Text="Ask Slime anything or type /help... (Enter to send, Shift+Enter for newline)"
+                                       Foreground="#5B647A"
+                                       FontSize="13"
+                                       VerticalAlignment="Center"
+                                       Margin="4,0,0,0"
+                                       IsHitTestVisible="False"/>
+
+                            <TextBox x:Name="InputTextBox"
+                                     Background="Transparent"
+                                     Foreground="#FFFFFF"
+                                     CaretBrush="#82AAFF"
+                                     BorderThickness="0"
+                                     FontSize="13"
+                                     AcceptsReturn="True"
+                                     TextWrapping="Wrap"
+                                     MaxHeight="100"
+                                     VerticalScrollBarVisibility="Auto"
+                                     PreviewKeyDown="InputTextBox_PreviewKeyDown"
+                                     TextChanged="InputTextBox_TextChanged"/>
+                        </Grid>
+                    </Border>
+
+                    <!-- Send Button -->
+                    <Button x:Name="SendButton"
+                            Grid.Column="1"
+                            Width="44"
+                            Height="38"
+                            Margin="8,0,0,0"
+                            Background="#4CAF50"
+                            BorderThickness="0"
+                            Cursor="Hand"
+                            Click="SendButton_Click"
+                            ToolTip="Send (Enter)">
+                        <Button.Template>
+                            <ControlTemplate TargetType="Button">
+                                <Border Background="{TemplateBinding Background}"
+                                        CornerRadius="8"
+                                        SnapsToDevicePixels="True">
+                                    <TextBlock Text="➤"
+                                               FontSize="16"
+                                               FontWeight="Bold"
+                                               Foreground="#FFFFFF"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"/>
+                                </Border>
+                            </ControlTemplate>
+                        </Button.Template>
+                        <Button.Style>
+                            <Style TargetType="Button">
+                                <Style.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter Property="Background" Value="#43A047"/>
+                                    </Trigger>
+                                    <Trigger Property="IsEnabled" Value="False">
+                                        <Setter Property="Background" Value="#2A3A2C"/>
+                                        <Setter Property="Opacity" Value="0.6"/>
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                </Grid>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

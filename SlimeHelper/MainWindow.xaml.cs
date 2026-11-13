@@ -63,6 +63,13 @@ namespace SlimeHelper
         //memoney
         private readonly SlimeBrainManager _brainManager = new();
 
+        // Chat Window & Events
+        private ChatWindow? _chatWindow;
+        public event Action<string>? AiStatusChanged;
+        public event Action<string, string>? AiResponseReceived;
+        public event Action<string>? AiErrorOccurred;
+        public event Action<string, string, string>? AiUserMessageReceived;
+
         private static readonly HashSet<string> IgnoredHashDirectives = new(StringComparer.OrdinalIgnoreCase)
         {
             "#if", "#else", "#elif", "#endif", "#define", "#undef",
@@ -200,6 +207,12 @@ namespace SlimeHelper
                 {
                     ContextMenu.IsOpen = true;
                 }
+            };
+
+            // Double click opens Chat Window
+            MouseDoubleClick += (s, e) =>
+            {
+                OpenChatWindow();
             };
 
             SetupCommandWatcher();
@@ -676,20 +689,62 @@ namespace SlimeHelper
         {
             if (sender is MenuItem item)
             {
-                currentSkin = item.Tag?.ToString() ?? "Default";
-                SaveSettings();
-
-                string greeting = currentSkin switch
-                {
-                    "Green" => "Goo-morning! Let's melt some bugs.",
-                    "Pink" => "Fabulous! I feel... different.",
-                    "Girl" => "I'm ready! Let's go!",
-                    _ => "I'm blue dabidi dabida."
-                };
-
-                LoadAnimations();
-                ShowTempMessage(greeting, "IDLE", 3);
+                ApplySkin(item.Tag?.ToString() ?? "Default");
             }
+        }
+
+        public void ApplySkin(string newSkin)
+        {
+            if (string.IsNullOrWhiteSpace(newSkin)) return;
+            newSkin = string.Concat(char.ToUpperInvariant(newSkin[0]), newSkin.AsSpan(1).ToString().ToLowerInvariant());
+
+            currentSkin = newSkin;
+            var settings = LoadFullSettings();
+            settings.CurrentSkin = currentSkin;
+            SaveFullSettings(settings);
+
+            string greeting = currentSkin switch
+            {
+                "Green" => "Goo-morning! Let's melt some bugs.",
+                "Pink" => "Fabulous! I feel... different.",
+                "Girl" => "I'm ready! Let's go!",
+                _ => "I'm blue dabidi dabida."
+            };
+
+            LoadAnimations();
+            StartMotionLoop();
+            ShowTempMessage(greeting, "IDLE", 3);
+        }
+
+        public void OpenChatWindow(string? initialThread = null)
+        {
+            if (_chatWindow == null || !_chatWindow.IsLoaded)
+            {
+                _chatWindow = new ChatWindow(this, _brainManager, _calendarWatcher);
+                _chatWindow.Closed += (s, e) => _chatWindow = null;
+            }
+
+            if (!string.IsNullOrEmpty(initialThread))
+            {
+                _chatWindow.SelectThread(initialThread);
+            }
+
+            _chatWindow.Show();
+            if (_chatWindow.WindowState == WindowState.Minimized)
+            {
+                _chatWindow.WindowState = WindowState.Normal;
+            }
+            _chatWindow.Activate();
+        }
+
+        private void OnOpenChatClick(object sender, RoutedEventArgs e)
+        {
+            OpenChatWindow();
+        }
+
+        private void SpeechBubble_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            OpenChatWindow();
         }
 
         private void SaveSettings()
@@ -748,7 +803,7 @@ namespace SlimeHelper
             }
         }
 
-        private void TriggerOpenNotes()
+        public void TriggerOpenNotes()
         {
             try
             {
@@ -894,7 +949,7 @@ namespace SlimeHelper
             catch { }
         }
 
-        private async void ProcessAiRequest(string prompt, string? cliRequestId = null, string? workingDir = null)
+        public async void ProcessAiRequest(string prompt, string? cliRequestId = null, string? workingDir = null, string? requestedThread = null, string source = "App")
         {
             isInteracting = true;
             _interactionTimer?.Stop();
@@ -904,6 +959,7 @@ namespace SlimeHelper
             SpeechText.Foreground = Brushes.Black;
             SpeechBubble.Visibility = Visibility.Visible;
             ShowSlimeReaction("THINKING", "");
+            AiStatusChanged?.Invoke(SpeechText.Text);
 
             try
             {
@@ -930,6 +986,17 @@ namespace SlimeHelper
                 if (boundRepos.Count > 0)
                 {
                     activeThread = boundRepos[0].Tag;
+                }
+                else if (!string.IsNullOrEmpty(requestedThread) && requestedThread != "General")
+                {
+                    activeThread = requestedThread;
+                    var repoMap = _brainManager.GetBoundRepos();
+                    if (repoMap.TryGetValue(activeThread, out var path) && Directory.Exists(path))
+                    {
+                        boundRepos.Add((activeThread, path));
+                        boundPaths.Add(path);
+                        targetRepoPath = path;
+                    }
                 }
                 else
                 {
@@ -996,6 +1063,8 @@ namespace SlimeHelper
                 {
                     cwdHint += " If asked where you or the user are, or what the current folder is, answer from this line and never guess.";
                 }
+
+                AiUserMessageReceived?.Invoke(activeThread, prompt, source);
 
                 string standardContext = ContextManager.BuildFullContext(settings, prompt, lastStatus);
                 string tagContext = "";
@@ -1098,6 +1167,7 @@ namespace SlimeHelper
                 if (pendingChecks.Count > 0)
                 {
                     SpeechText.Text = cleanResponse; // visar t.ex. "I'm running the build check... 🔨"
+                    AiStatusChanged?.Invoke(cleanResponse);
                     followUpPrompt = await SlimeToolManager.RunCheckRequestsAsync(pendingChecks, targetRepoPath, activeThread, followUpPrompt);
                 }
 
@@ -1123,6 +1193,7 @@ namespace SlimeHelper
                 while (NeedsFollowUp() && rounds++ < maxRounds)
                 {
                     SpeechText.Text = cleanResponse; // the UI shows e.g. "I'm reading the file..."
+                    AiStatusChanged?.Invoke(cleanResponse);
 
                     // Spara bara en kort markör i historiken, annars hamnar hela filinnehåll i chat_history.json
                     string shortNote = followUpPrompt.Length > 400
@@ -1216,6 +1287,7 @@ namespace SlimeHelper
                     if (pendingChecks.Count > 0)
                     {
                         SpeechText.Text = cleanResponse;
+                        AiStatusChanged?.Invoke(cleanResponse);
                         followUpPrompt = await SlimeToolManager.RunCheckRequestsAsync(pendingChecks, targetRepoPath, activeThread, followUpPrompt);
                     }
                 }
@@ -1234,6 +1306,7 @@ namespace SlimeHelper
 
                 // 4. Visa det slutgiltiga resultatet i appen
                 SpeechText.Text = cleanResponse;
+                AiResponseReceived?.Invoke(activeThread, cleanResponse);
                 WriteCliResponse(cliRequestId, cliText);
                 ShowSlimeReaction("IDLE", "");
                 PlaySounds("Idle.wav");
@@ -1241,6 +1314,7 @@ namespace SlimeHelper
             catch (Exception ex)
             {
                 SpeechText.Text = $"Brain freeze! {ex.Message}";
+                AiErrorOccurred?.Invoke(ex.Message);
                 WriteCliResponse(cliRequestId, SpeechText.Text, true);
                 ShowSlimeReaction("ERROR", "");
                 SpeechText.Foreground = Brushes.Red;
@@ -1746,7 +1820,7 @@ namespace SlimeHelper
                         }
                         else if (!string.IsNullOrEmpty(prompt))
                         {
-                            Dispatcher.Invoke(() => ProcessAiRequest(prompt, requestId, workingDir));
+                            Dispatcher.Invoke(() => ProcessAiRequest(prompt, requestId, workingDir, source: "CLI"));
                         }
 
                         File.WriteAllText(commandFile, "");
