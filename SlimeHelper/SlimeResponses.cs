@@ -1,4 +1,4 @@
-﻿namespace SlimeHelper
+namespace SlimeHelper
 {
     public static class SlimeResponses
     {
@@ -8,6 +8,31 @@
         {
             if (list == null || list.Count == 0) return string.Empty;
             return list[_rnd.Next(list.Count)];
+        }
+
+        public static (string Status, string Message) PickIdleChatter(DateTime now, Random rng)
+        {
+            if (now.Hour is >= 23 or < 5 && rng.Next(0, 3) == 0)
+            {
+                return ("TIRED", "It's late. Slime is tired...");
+            }
+            if (now.DayOfWeek == DayOfWeek.Friday && now.Hour >= 15 && rng.Next(0, 3) == 0)
+            {
+                return ("STREAK", "It's Friday! Friday! Yey!");
+            }
+            if (now.DayOfWeek == DayOfWeek.Monday && now.Hour < 9 && rng.Next(0, 3) == 0)
+            {
+                return ("TIRED", "Monday... need coffee...");
+            }
+            if (now.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday && rng.Next(0, 4) == 0)
+            {
+                return ("UNSURE", "Working on the weekend? Really?");
+            }
+
+            string randomThought = PickRandom(IdleThoughts);
+            string[] randomReactions = { "IDLE", "CUTE", "THINKING", "HURRAY" };
+            string selectedReaction = randomReactions[rng.Next(randomReactions.Length)];
+            return (selectedReaction, randomThought);
         }
 
         public static readonly string[] ConsoleResponses = new[]

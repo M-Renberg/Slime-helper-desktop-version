@@ -61,6 +61,7 @@ namespace SlimeHelper.Checks
                 await TrailTests(brain, work);
                 ToolExecutionSpecialistTests(brain, work);
                 await GitHubTests(work);
+                WatcherTests(work);
             }
             finally
             {
@@ -840,6 +841,61 @@ namespace SlimeHelper.Checks
             string emptyJobJson = "{\"id\":0,\"run_id\":0,\"name\":\"\",\"status\":\"\"}";
             var emptyJob = System.Text.Json.JsonSerializer.Deserialize<GitHubJob>(emptyJobJson);
             Check(emptyJob != null && emptyJob.Steps.Count == 0, "Minimal GitHubJob has initialized empty steps list");
+        }
+
+        // ------------------------------------------------------------------ watchers (ActivityWatcher & GlobalWordWatcher)
+        static void WatcherTests(string work)
+        {
+            Console.WriteLine("\n== Watchers: GlobalWordWatcher and ActivityWatcher fixes");
+
+            // 1. KeyCodeToChar digits and symbols
+            Check(GlobalWordWatcher.KeyCodeToChar(49, false) == '1', "KeyCodeToChar maps '1'");
+            Check(GlobalWordWatcher.KeyCodeToChar(49, true) == '!', "KeyCodeToChar maps Shift+1 to '!'");
+            Check(GlobalWordWatcher.KeyCodeToChar(56, true) == '(', "KeyCodeToChar maps Shift+8 to '('");
+            Check(GlobalWordWatcher.KeyCodeToChar(57, true) == ')', "KeyCodeToChar maps Shift+9 to ')'");
+            Check(GlobalWordWatcher.KeyCodeToChar(186, false) == ';', "KeyCodeToChar maps ';' on OEM_1");
+            Check(GlobalWordWatcher.KeyCodeToChar(188, true) == ';', "KeyCodeToChar maps Nordic Shift+, to ';'");
+            Check(GlobalWordWatcher.KeyCodeToChar(190, true) == ':', "KeyCodeToChar maps Nordic Shift+. to ':'");
+
+            // 2. MatchTrigger for multi-word and punctuation triggers that previously failed
+            var nullTrigger = GlobalWordWatcher.MatchTrigger("null;", "return null;");
+            Check(nullTrigger.HasValue && nullTrigger.Value.Status == "PUSH", "return null triggers PUSH (not missing PUSH_NEEDED)", $"{nullTrigger}");
+
+            var loopTrigger = GlobalWordWatcher.MatchTrigger("while(true)", "while(true)");
+            Check(loopTrigger.HasValue && loopTrigger.Value.Status == "ERROR", "while(true) triggers ERROR", $"{loopTrigger}");
+
+            var forTrigger = GlobalWordWatcher.MatchTrigger(";", "for(;;)");
+            Check(forTrigger.HasValue && forTrigger.Value.Status == "ERROR", "for(;;) triggers ERROR", $"{forTrigger}");
+
+            var impTrigger = GlobalWordWatcher.MatchTrigger("!important", "color: red !important");
+            Check(impTrigger.HasValue && impTrigger.Value.Status == "ANNOYED", "!important triggers ANNOYED", $"{impTrigger}");
+
+            var leetTrigger = GlobalWordWatcher.MatchTrigger("1337", "1337");
+            Check(leetTrigger.HasValue && leetTrigger.Value.Status == "STREAK", "1337 numeric word triggers STREAK", $"{leetTrigger}");
+
+            var ipTrigger = GlobalWordWatcher.MatchTrigger("127.0.0.1", "http://127.0.0.1");
+            Check(ipTrigger.HasValue && ipTrigger.Value.Status == "FUNNY", "127.0.0.1 triggers FUNNY", $"{ipTrigger}");
+
+            var dropTrigger = GlobalWordWatcher.MatchTrigger("table", "drop table users");
+            Check(dropTrigger.HasValue && dropTrigger.Value.Status == "POKE", "drop table multi-word phrase triggers POKE", $"{dropTrigger}");
+
+            var selectTrigger = GlobalWordWatcher.MatchTrigger("*", "select * from");
+            Check(selectTrigger.HasValue && selectTrigger.Value.Status == "STREAK", "select * multi-word phrase triggers STREAK", $"{selectTrigger}");
+
+            // 3. SlimeResponses PickIdleChatter time-of-day reactions
+            var lateNight = new DateTime(2026, 11, 16, 23, 30, 0);
+            bool sawTiredLateNight = false;
+            var testRng = new Random(42);
+            for (int i = 0; i < 25; i++)
+            {
+                var (status, msg) = SlimeResponses.PickIdleChatter(lateNight, testRng);
+                if (status == "TIRED" && msg.Contains("late"))
+                {
+                    sawTiredLateNight = true;
+                    break;
+                }
+            }
+            Check(sawTiredLateNight, "PickIdleChatter surfaces late-night TIRED reaction");
         }
     }
 }

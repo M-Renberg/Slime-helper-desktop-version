@@ -39,6 +39,7 @@ namespace SlimeHelper
         private FileSystemWatcher? _cliCommandWatcher;
 
         private bool _isAfkSleeping = false;
+        private bool _isAiBusy = false;
 
         // Animation State Machine variabler
         private CancellationTokenSource? _animationCts;
@@ -217,6 +218,7 @@ namespace SlimeHelper
             string initialGhPath = !string.IsNullOrEmpty(settings.ReposRootPath) && Directory.Exists(settings.ReposRootPath)
                 ? settings.ReposRootPath
                 : Directory.GetCurrentDirectory();
+            _activityWatcher.ActiveRepoPath = initialGhPath;
             _gitHubWatcher.Start(initialGhPath, settings.GitHubToken);
 
             // Drag function
@@ -311,18 +313,24 @@ namespace SlimeHelper
 
             Dispatcher.Invoke(() =>
             {
-                // AFK-sömn: håll SLEEP tills användaren är tillbaka (ingen timer)
+                bool isIdleChatter = status.StartsWith("IDLE_CHAT:", StringComparison.OrdinalIgnoreCase);
+                if (isIdleChatter)
+                {
+                    status = status["IDLE_CHAT:".Length..];
+                }
+
+                // AFK sleep: hold SLEEP state until the user returns (no auto-hide timer)
                 if (status == "SLEEP")
                 {
                     _isAfkSleeping = true;
                     _interactionTimer?.Stop();
-                    isInteracting = true; // blockerar statusfil-polling och idle-flavor medan hon sover
+                    isInteracting = true; // blocks status-file polling and idle flavor while asleep
                     ShowSlimeReaction("SLEEP", msg);
                     HideBubbleAfterDelay(4);
                     return;
                 }
 
-                // Första reaktionen efter AFK-sömn = väckning, ska alltid gå igenom
+                // First reaction after AFK sleep wakes Slime up and always goes through
                 bool wakingUp = _isAfkSleeping;
                 if (wakingUp)
                 {
@@ -330,8 +338,8 @@ namespace SlimeHelper
                     isInteracting = false;
                 }
 
-                // Spärr för slumpmässigt IDLE-prat (gäller inte väckningen)
-                if (status == "IDLE" && !string.IsNullOrEmpty(msg) && !wakingUp)
+                // Cooldown for random idle chatter across all idle emotions (does not block wake-up)
+                if ((isIdleChatter || status == "IDLE") && !string.IsNullOrEmpty(msg) && !wakingUp)
                 {
                     if ((DateTime.Now - _lastRandomChatter).TotalMinutes < 10) return;
                     _lastRandomChatter = DateTime.Now;
@@ -554,9 +562,10 @@ namespace SlimeHelper
 
         private void PokeSlime()
         {
-            if (isInteracting) return;
+            if (_isAsleep || _isAfkSleeping || _isAiBusy) return;
 
             PlaySounds("Poke.wav");
+            TriggerImpact(1.6);
 
             string[] pokePhrase = currentSkin switch
             {
@@ -1007,6 +1016,7 @@ namespace SlimeHelper
         public async void ProcessAiRequest(string prompt, string? cliRequestId = null, string? workingDir = null, string? requestedThread = null, string source = "App")
         {
             isInteracting = true;
+            _isAiBusy = true;
             _interactionTimer?.Stop();
             string response = "";
 
@@ -1378,6 +1388,10 @@ namespace SlimeHelper
                 ShowSlimeReaction("ERROR", "");
                 SpeechText.Foreground = Brushes.Red;
             }
+            finally
+            {
+                _isAiBusy = false;
+            }
 
             int displayTime = Math.Max(6, SpeechText.Text.Length / 20);
             StartInteractionTimer(displayTime);
@@ -1501,6 +1515,7 @@ namespace SlimeHelper
                 SaveFullSettings(currentSettings);
 
                 _codeWatcher.Start(currentSettings.ReposRootPath);
+                _activityWatcher.ActiveRepoPath = currentSettings.ReposRootPath;
                 _gitHubWatcher.SetActiveRepo(currentSettings.ReposRootPath);
 
                 ShowTempMessage("Git Repositories folder linked!", "NOTES", 3);

@@ -15,13 +15,18 @@ namespace SlimeHelper
 
         public event Action<string, string>? OnReaction;
 
+        /// <summary>
+        /// Configured repository path or root repositories directory used by CheckGitStatus.
+        /// </summary>
+        public string? ActiveRepoPath { get; set; }
+
         private readonly DispatcherTimer _idleTalkTimer;
 
         private static IntPtr _hookID = IntPtr.Zero;
         private static LowLevelKeyboardProc? _proc;
         private static DateTime _lastKeyboardActivity = DateTime.Now;
 
-        // En instans-referens så att den statiska hooken kan nå händelsen
+        // Instance reference so the static keyboard hook can reach the active watcher
         private static ActivityWatcher? _instance;
 
         private readonly Random _rng = new();
@@ -41,24 +46,23 @@ namespace SlimeHelper
             {
                 if (!_isCurrentlyAfk)
                 {
-                    string randomThought = SlimeResponses.PickRandom(SlimeResponses.IdleThoughts);
+                    var (selectedReaction, randomThought) = PickIdleChatter(DateTime.Now, _rng);
 
-                    // En array med roliga statusar/animationer hon kan växla mellan
-                    string[] randomReactions = { "IDLE", "CUTE", "THINKING", "HURRAY" };
-                    string selectedReaction = randomReactions[_rng.Next(randomReactions.Length)];
-
-                    // Skicka med den slumpade reaktionen istället för att alltid köra "IDLE"
-                    OnReaction?.Invoke(selectedReaction, randomThought);
+                    // Prefix with IDLE_CHAT: so MainWindow enforces the chatter cooldown across all emotions
+                    OnReaction?.Invoke($"IDLE_CHAT:{selectedReaction}", randomThought);
                 }
             };
             _idleTalkTimer.Start();
         }
 
+        public static (string Status, string Message) PickIdleChatter(DateTime now, Random rng) =>
+            SlimeResponses.PickIdleChatter(now, rng);
+
         private void CheckActivity(object? sender, EventArgs e)
         {
             double inactiveMinutes = (DateTime.Now - _lastKeyboardActivity).TotalMinutes;
 
-            // Om vi är inaktiva i mer än 6 minuter -> gå in i SLEEP och stanna där!
+            // Enter SLEEP after 6 minutes of inactivity and remain there until input resumes
             if (inactiveMinutes > 6)
             {
                 if (!_isCurrentlyAfk)
@@ -67,18 +71,17 @@ namespace SlimeHelper
                     _streakMinutes = 0;
                     OnReaction?.Invoke("SLEEP", "Zzz...");
                 }
-                // VIKTIGT: Returnera direkt här så att inga andra IDLE- eller streak-regler körs medan hon sover!
                 return;
             }
 
-            // Om hon var AFK/sover men vi fångar upp att inaktiviteten är borta
+            // Wake up if previously AFK
             if (_isCurrentlyAfk)
             {
                 _isCurrentlyAfk = false;
                 OnReaction?.Invoke("IDLE", "Oh, you're back!");
             }
 
-            // Git-koll var 5:e minut
+            // Git check every 5 minutes
             _gitCheckCounter++;
             if (_gitCheckCounter >= 10)
             {
@@ -107,11 +110,50 @@ namespace SlimeHelper
             }
         }
 
+        public static string? ResolveGitRepoPath(string? configuredPath)
+        {
+            static bool IsGitRepo(string dir) =>
+                !string.IsNullOrWhiteSpace(dir) &&
+                (Directory.Exists(Path.Combine(dir, ".git")) || File.Exists(Path.Combine(dir, ".git")));
+
+            static string? FindGitRootUpwards(string? startDir)
+            {
+                if (string.IsNullOrWhiteSpace(startDir) || !Directory.Exists(startDir)) return null;
+                var dir = new DirectoryInfo(startDir);
+                while (dir != null)
+                {
+                    if (IsGitRepo(dir.FullName)) return dir.FullName;
+                    dir = dir.Parent;
+                }
+                return null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(configuredPath) && Directory.Exists(configuredPath))
+            {
+                string? directRoot = FindGitRootUpwards(configuredPath);
+                if (directRoot != null) return directRoot;
+
+                // If configuredPath is a parent folder of multiple repos, pick the most recently modified repo
+                try
+                {
+                    var subRepos = Directory.GetDirectories(configuredPath)
+                        .Where(IsGitRepo)
+                        .OrderByDescending(d => Directory.GetLastWriteTimeUtc(d))
+                        .FirstOrDefault();
+                    if (subRepos != null) return subRepos;
+                }
+                catch { }
+            }
+
+            return FindGitRootUpwards(Directory.GetCurrentDirectory());
+        }
+
         private void CheckGitStatus()
         {
             try
             {
-                string repoPath = Directory.GetCurrentDirectory();
+                string? repoPath = ResolveGitRepoPath(ActiveRepoPath);
+                if (string.IsNullOrWhiteSpace(repoPath)) return;
 
                 var psi = new ProcessStartInfo
                 {

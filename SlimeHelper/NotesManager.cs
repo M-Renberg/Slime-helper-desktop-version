@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Text.RegularExpressions;
 
 namespace SlimeHelper
@@ -10,12 +10,12 @@ namespace SlimeHelper
             if (string.IsNullOrWhiteSpace(targetFolder) || !Directory.Exists(targetFolder))
                 return string.Empty;
 
-            string notesPath = Path.Combine(targetFolder, "slime_notes.md"); //[cite: 1, 5]
+            string notesPath = Path.Combine(targetFolder, "slime_notes.md");
 
             if (!File.Exists(notesPath))
             {
-                File.WriteAllText(notesPath, "# Slime Notes & TODOs\n\n- [ ] My first To-Do\n"); //[cite: 1]
-                EnsureNotesInGitignore(targetFolder); //[cite: 1]
+                File.WriteAllText(notesPath, "# Slime Notes & TODOs\n\n- [ ] My first To-Do\n");
+                EnsureNotesInGitignore(targetFolder);
             }
 
             return notesPath;
@@ -23,21 +23,21 @@ namespace SlimeHelper
 
         public static void EnsureNotesInGitignore(string workspaceRoot)
         {
-            string gitignorePath = Path.Combine(workspaceRoot, ".gitignore"); //[cite: 5]
-            const string notesFileName = "slime_notes.md"; //[cite: 5]
+            string gitignorePath = Path.Combine(workspaceRoot, ".gitignore");
+            const string notesFileName = "slime_notes.md";
 
             if (File.Exists(gitignorePath))
             {
-                string content = File.ReadAllText(gitignorePath); //[cite: 5]
-                var regex = new Regex($@"^{Regex.Escape(notesFileName)}\s*$", RegexOptions.Multiline); //[cite: 5]
+                string content = File.ReadAllText(gitignorePath);
+                var regex = new Regex($@"^{Regex.Escape(notesFileName)}\s*$", RegexOptions.Multiline);
 
-                if (!regex.IsMatch(content)) //[cite: 5]
+                if (!regex.IsMatch(content))
                 {
-                    string newContent = content.EndsWith("\n") //[cite: 5]
-                        ? $"{content}# Slime Helper Notes\n{notesFileName}\n" //[cite: 5]
-                        : $"{content}\n\n# Slime Helper Notes\n{notesFileName}\n"; //[cite: 5]
+                    string newContent = content.EndsWith("\n")
+                        ? $"{content}# Slime Helper Notes\n{notesFileName}\n"
+                        : $"{content}\n\n# Slime Helper Notes\n{notesFileName}\n";
 
-                    File.WriteAllText(gitignorePath, newContent); //[cite: 5]
+                    File.WriteAllText(gitignorePath, newContent);
                 }
             }
         }

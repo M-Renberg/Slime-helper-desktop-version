@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -9,7 +9,9 @@ namespace SlimeHelper
         private static IntPtr _hookID = IntPtr.Zero;
         private static LowLevelKeyboardProc? _proc;
         private static readonly StringBuilder _wordBuffer = new();
-        private const int MaxBufferLength = 15;
+        private static readonly StringBuilder _recentBuffer = new();
+        private const int MaxBufferLength = 25;
+        private const int MaxRecentLength = 45;
 
         public event Action<string, string>? OnReaction;
 
@@ -39,25 +41,7 @@ namespace SlimeHelper
 
                 if (keyChar != '\0')
                 {
-                    if (keyChar == ' ' || keyChar == '.' || keyChar == '\n' || keyChar == '\r')
-                    {
-                        string completedWord = _wordBuffer.ToString().ToLower().Trim();
-
-                        // Skicka vidare det färdiga ordet för analys
-                        Instance?.AnalyzeWord(completedWord);
-
-                        _wordBuffer.Clear();
-                    }
-                    else if (keyChar == '\b') // Backspace
-                    {
-                        if (_wordBuffer.Length > 0)
-                            _wordBuffer.Remove(_wordBuffer.Length - 1, 1);
-                    }
-                    else
-                    {
-                        if (_wordBuffer.Length < MaxBufferLength)
-                            _wordBuffer.Append(keyChar);
-                    }
+                    Instance?.ProcessChar(keyChar);
                 }
             }
             return CallNextHookEx(_hookID, nCode, wParam, lParam);
@@ -70,108 +54,199 @@ namespace SlimeHelper
             Instance = this;
         }
 
-        private void AnalyzeWord(string word)
+        public void ProcessChar(char keyChar)
         {
-            if (string.IsNullOrWhiteSpace(word) || word.Length < 3) return;
+            if (keyChar == '\b') // Backspace
+            {
+                if (_wordBuffer.Length > 0)
+                    _wordBuffer.Remove(_wordBuffer.Length - 1, 1);
+                if (_recentBuffer.Length > 0)
+                    _recentBuffer.Remove(_recentBuffer.Length - 1, 1);
+                return;
+            }
 
-            // Komplett matchningslista
-            if (word.Contains("console") || word.Contains("print") || word.Contains("writeline"))
+            char normalizedChar = (keyChar == '\n' || keyChar == '\r') ? ' ' : char.ToLowerInvariant(keyChar);
+            _recentBuffer.Append(normalizedChar);
+            if (_recentBuffer.Length > MaxRecentLength)
             {
-                OnReaction?.Invoke("BREAK", SlimeResponses.PickRandom(SlimeResponses.ConsoleResponses));
+                _recentBuffer.Remove(0, _recentBuffer.Length - MaxRecentLength);
             }
-            else if (word.Contains("debug"))
+
+            if (keyChar == ' ' || keyChar == '\n' || keyChar == '\r' || keyChar == ';' || keyChar == ')')
             {
-                OnReaction?.Invoke("POKE", SlimeResponses.PickRandom(SlimeResponses.DebugResponses));
+                if (keyChar == ';' || keyChar == ')')
+                {
+                    if (_wordBuffer.Length < MaxBufferLength)
+                        _wordBuffer.Append(normalizedChar);
+                }
+
+                string completedWord = _wordBuffer.ToString().ToLowerInvariant().Trim();
+                AnalyzeWord(completedWord);
+                _wordBuffer.Clear();
             }
-            else if (word.Contains("1337") || word.Contains("hacker") || word.Contains("root"))
+            else
             {
-                OnReaction?.Invoke("STREAK", SlimeResponses.PickRandom(SlimeResponses.CoolResponses));
-            }
-            else if (word.Contains("fuck") || word.Contains("damn") || word.Contains("fucking") || word.Contains("shit"))
-            {
-                OnReaction?.Invoke("ANNOYED", SlimeResponses.PickRandom(SlimeResponses.SwearResponses));
-            }
-            else if (word.Contains("slime"))
-            {
-                OnReaction?.Invoke("STREAK", "We're talking about me?");
-            }
-            else if (word.Contains("todo") || word.Contains("fixme"))
-            {
-                OnReaction?.Invoke("TIRED", SlimeResponses.PickRandom(SlimeResponses.TodoResponses));
-            }
-            else if (word.Contains("foo") || word.Contains("bar") || word.Contains("temp"))
-            {
-                OnReaction?.Invoke("FUNNY", SlimeResponses.PickRandom(SlimeResponses.FunnyResponses));
-            }
-            else if (word.Contains("while(true)") || word.Contains("for(;;)"))
-            {
-                OnReaction?.Invoke("ERROR", "Wait... Eternity loop?!?!?!'");
-            }
-            else if (word.Contains("return null") || word.Contains("null;"))
-            {
-                OnReaction?.Invoke("PUSH_NEEDED", "Null? Are you sure about that?");
-            }
-            else if (word.Contains("!important"))
-            {
-                OnReaction?.Invoke("ANNOYED", "Cheater! Dont use !important!");
-            }
-            else if (word.Contains("http") || word.Contains("www.") || word.Contains("stackoverflow"))
-            {
-                OnReaction?.Invoke("FUNNY", "Ctrl+C, Ctrl+V champion!");
-            }
-            else if (word.Contains("async") || word.Contains("await") || word.Contains("thread.sleep"))
-            {
-                OnReaction?.Invoke("SLEEP", "Zzz... Yeah I'm waiting...");
-            }
-            else if (word.Contains("coffee") || word.Contains("drink") || word.Contains("pizza") || word.Contains("snack"))
-            {
-                OnReaction?.Invoke("BREAK", "Did you say food? I want some! Give me!");
-            }
-            else if (word.Contains("sudo"))
-            {
-                OnReaction?.Invoke("STREAK", "Yes master!");
-            }
-            else if (word.Contains("any") && word.Contains(":"))
-            {
-                OnReaction?.Invoke("FUNNY", "Type safety? Never heard of it?");
-            }
-            else if (word.Contains("localhost") || word.Contains("127.0.0.1"))
-            {
-                OnReaction?.Invoke("FUNNY", "I found the connection!");
-            }
-            else if (word.Contains("drop table") || word.Contains("delete from") || word.Contains("truncate"))
-            {
-                OnReaction?.Invoke("POKE", "Wait! Don't delete the database!");
-            }
-            else if (word.Contains("select *"))
-            {
-                OnReaction?.Invoke("STREAK", "Give me ALL the data!");
-            }
-            else if (word.Contains("regex") || word.Contains("regexp"))
-            {
-                OnReaction?.Invoke("WARNING", "Magic spells? I don't speak RegEx");
-            }
-            else if (word.Contains("copilot") || word.Contains("chatgpt") || word.Contains("generate"))
-            {
-                OnReaction?.Invoke("STREAK", "Am I being replaced by another AI?");
-            }
-            else if (word.Contains("password") || word.Contains("secret"))
-            {
-                OnReaction?.Invoke("WARNING", "Don't hardcode secrets!");
+                if (_wordBuffer.Length < MaxBufferLength)
+                    _wordBuffer.Append(normalizedChar);
             }
         }
 
-        private static char KeyCodeToChar(int vkCode)
+        public void ResetBuffers()
         {
+            _wordBuffer.Clear();
+            _recentBuffer.Clear();
+        }
+
+        private void AnalyzeWord(string word)
+        {
+            string recentPhrase = _recentBuffer.ToString();
+            var match = MatchTrigger(word, recentPhrase);
+            if (match.HasValue)
+            {
+                _recentBuffer.Clear();
+                OnReaction?.Invoke(match.Value.Status, match.Value.Message);
+            }
+        }
+
+        public static (string Status, string Message)? MatchTrigger(string word, string recentPhrase = "")
+        {
+            string w = (word ?? "").ToLowerInvariant().Trim();
+            string phrase = string.IsNullOrWhiteSpace(recentPhrase) ? w : recentPhrase.ToLowerInvariant();
+
+            if (w.Length < 3 && phrase.Length < 3) return null;
+
+            // Multi-word and symbol phrase triggers checked first against the rolling phrase buffer
+            if (phrase.Contains("while(true)") || phrase.Contains("for(;;)"))
+            {
+                return ("ERROR", "Wait... Eternity loop?!?!?!'");
+            }
+            if (phrase.Contains("return null") || w.Contains("null;"))
+            {
+                return ("PUSH", "Null? Are you sure about that?");
+            }
+            if (phrase.Contains("!important"))
+            {
+                return ("ANNOYED", "Cheater! Dont use !important!");
+            }
+            if (phrase.Contains("drop table") || phrase.Contains("delete from") || w.Contains("truncate"))
+            {
+                return ("POKE", "Wait! Don't delete the database!");
+            }
+            if (phrase.Contains("select *"))
+            {
+                return ("STREAK", "Give me ALL the data!");
+            }
+            if (phrase.Contains("127.0.0.1") || w.Contains("localhost"))
+            {
+                return ("FUNNY", "I found the connection!");
+            }
+            if ((w.Contains("any") && w.Contains(":")) || phrase.Contains(": any") || phrase.Contains(":any"))
+            {
+                return ("FUNNY", "Type safety? Never heard of it?");
+            }
+
+            if (w.Length < 3) return null;
+
+            // Single-word triggers
+            if (w.Contains("console") || w.Contains("print") || w.Contains("writeline"))
+            {
+                return ("BREAK", SlimeResponses.PickRandom(SlimeResponses.ConsoleResponses));
+            }
+            if (w.Contains("debug"))
+            {
+                return ("POKE", SlimeResponses.PickRandom(SlimeResponses.DebugResponses));
+            }
+            if (w.Contains("1337") || w.Contains("hacker") || w.Contains("root"))
+            {
+                return ("STREAK", SlimeResponses.PickRandom(SlimeResponses.CoolResponses));
+            }
+            if (w.Contains("fuck") || w.Contains("damn") || w.Contains("fucking") || w.Contains("shit"))
+            {
+                return ("ANNOYED", SlimeResponses.PickRandom(SlimeResponses.SwearResponses));
+            }
+            if (w.Contains("slime"))
+            {
+                return ("STREAK", "We're talking about me?");
+            }
+            if (w.Contains("todo") || w.Contains("fixme"))
+            {
+                return ("TIRED", SlimeResponses.PickRandom(SlimeResponses.TodoResponses));
+            }
+            if (w.Contains("foo") || w.Contains("bar") || w.Contains("temp"))
+            {
+                return ("FUNNY", SlimeResponses.PickRandom(SlimeResponses.FunnyResponses));
+            }
+            if (w.Contains("http") || w.Contains("www.") || w.Contains("stackoverflow"))
+            {
+                return ("FUNNY", "Ctrl+C, Ctrl+V champion!");
+            }
+            if (w.Contains("async") || w.Contains("await") || w.Contains("thread.sleep") || phrase.Contains("thread.sleep"))
+            {
+                return ("SLEEP", "Zzz... Yeah I'm waiting...");
+            }
+            if (w.Contains("coffee") || w.Contains("drink") || w.Contains("pizza") || w.Contains("snack"))
+            {
+                return ("BREAK", "Did you say food? I want some! Give me!");
+            }
+            if (w.Contains("sudo"))
+            {
+                return ("STREAK", "Yes master!");
+            }
+            if (w.Contains("regex") || w.Contains("regexp"))
+            {
+                return ("WARNING", "Magic spells? I don't speak RegEx");
+            }
+            if (w.Contains("copilot") || w.Contains("chatgpt") || w.Contains("generate"))
+            {
+                return ("STREAK", "Am I being replaced by another AI?");
+            }
+            if (w.Contains("password") || w.Contains("secret"))
+            {
+                return ("WARNING", "Don't hardcode secrets!");
+            }
+
+            return null;
+        }
+
+        public static char KeyCodeToChar(int vkCode, bool? shiftOverride = null)
+        {
+            bool shift = shiftOverride ?? ((GetAsyncKeyState(0x10) & 0x8000) != 0);
+
             if (vkCode >= 65 && vkCode <= 90) // A-Z
             {
-                bool shift = (GetAsyncKeyState(0x10) & 0x8000) != 0;
                 return shift ? (char)vkCode : (char)(vkCode + 32);
             }
+
+            if (vkCode >= 48 && vkCode <= 57) // Top-row 0-9 and Shift symbols (US + Nordic layouts)
+            {
+                if (shift)
+                {
+                    return vkCode switch
+                    {
+                        49 => '!', // Shift+1
+                        56 => '(', // Shift+8 (Nordic '(')
+                        57 => ')', // Shift+9 (Nordic ')' / US '(')
+                        48 => ')', // Shift+0 (US ')')
+                        _ => (char)vkCode
+                    };
+                }
+                return (char)vkCode;
+            }
+
+            if (vkCode >= 96 && vkCode <= 105) // Numpad 0-9
+            {
+                return (char)('0' + (vkCode - 96));
+            }
+
+            if (vkCode == 106) return '*'; // Numpad multiply
             if (vkCode == 32) return ' ';
-            if (vkCode == 190 || vkCode == 110) return '.';
             if (vkCode == 13) return '\n';
             if (vkCode == 8) return '\b';
+            if (vkCode == 186) return shift ? ':' : ';'; // US OEM_1 (; / :)
+            if (vkCode == 188 && shift) return ';';      // Nordic Shift+, -> ';'
+            if (vkCode == 190) return shift ? ':' : '.'; // Period or Nordic Shift+. -> ':'
+            if (vkCode == 110) return '.';               // Numpad decimal
+            if (vkCode == 191 && shift) return '*';      // Nordic Shift+' -> '*'
 
             return '\0';
         }
