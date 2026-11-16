@@ -17,6 +17,8 @@
     <Compile Include="..\SlimeHelper\GitHubWatcher.cs" Link="App\GitHubWatcher.cs" />
     <Compile Include="..\SlimeHelper\SlimeResponses.cs" Link="App\SlimeResponses.cs" />
     <Compile Include="..\SlimeHelper\GlobalWordWatcher.cs" Link="App\GlobalWordWatcher.cs" />
+    <Compile Include="..\SlimeHelper\NotesManager.cs" Link="App\NotesManager.cs" />
+    <Compile Include="..\SlimeHelper\ObsidianService.cs" Link="App\ObsidianService.cs" />
   </ItemGroup>
 
 </Project>

@@ -319,9 +319,11 @@
                 <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                     <StackPanel Orientation="Horizontal">
                         <Button Content="❓ /help" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/help"/>
+                        <Button Content="📝 /todo" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/todo"/>
+                        <Button Content="✅ /todo done" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/todo done "/>
+                        <Button Content="⏱️ /focus 25" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/focus 25"/>
                         <Button Content="🎨 /skin" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/skin "/>
                         <Button Content="📅 /cal" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/cal "/>
-                        <Button Content="📝 /todo" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/todo "/>
                         <Button Content="📁 /notes" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/notes"/>
                         <Button Content="🔗 /bind" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/bind "/>
                         <Button Content="🐙 /gh status" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/gh status"/>

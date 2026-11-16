@@ -4,7 +4,7 @@ namespace SlimeHelper
 {
     public static class ContextManager
     {
-        public static string BuildFullContext(SlimeSettings settings, string userPrompt, string currentVsCodeStatus = "")
+        public static string BuildFullContext(SlimeSettings settings, string userPrompt, string currentVsCodeStatus = "", string?[]? extraTodoFolders = null)
         {
             var sb = new StringBuilder();
 
@@ -23,11 +23,13 @@ namespace SlimeHelper
                 }
             }
 
-            // 2. Obsidian: Aktiva To-Dos
-            var todos = ObsidianService.GetUnfinishedTodos(settings.ObsidianVaultPath);
+            // 2. Obsidian & Local slime_notes.md: Active To-Dos
+            var todos = extraTodoFolders != null
+                ? ObsidianService.GetUnfinishedTodos(settings.ObsidianVaultPath, 8, extraTodoFolders)
+                : ObsidianService.GetUnfinishedTodos(settings.ObsidianVaultPath);
             if (todos.Count > 0)
             {
-                sb.AppendLine($"[Obsidian Tasks: {string.Join(", ", todos)}]");
+                sb.AppendLine($"[Active To-Do Tasks: {string.Join(", ", todos)}]");
             }
 
             // 3. Obsidian: Dagens anteckning

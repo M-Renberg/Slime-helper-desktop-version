@@ -442,6 +442,86 @@ namespace SlimeHelper
         }
 
         /// <summary>
+        /// Returns the General Notes folder inside SlimeBrain (located in the Obsidian vault if linked, or LocalAppData otherwise).
+        /// </summary>
+        public string GetGeneralNotesFolder()
+        {
+            string dir = Path.Combine(_brainRootPath, "Notes");
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+
+        /// <summary>
+        /// Resolves the target directory where slime_notes.md should be read/written for a given thread.
+        /// Bound #repos write to their repository root; @subjects write to their subject folder; General writes to SlimeBrain/Notes.
+        /// </summary>
+        public string ResolveTodoFolder(string? activeThread = null)
+        {
+            if (!string.IsNullOrWhiteSpace(activeThread))
+            {
+                if (activeThread.StartsWith("@"))
+                {
+                    string cleanSubject = activeThread.Replace("@", "").Trim();
+                    string subjectDir = Path.Combine(_subjectsFolder, cleanSubject);
+                    Directory.CreateDirectory(subjectDir);
+                    return subjectDir;
+                }
+
+                if (!activeThread.Equals("General", StringComparison.OrdinalIgnoreCase))
+                {
+                    var repoMap = LoadRepoMap();
+                    string normTag = NormalizeTag(activeThread);
+                    if (repoMap.TryGetValue(normTag, out var repoPath) && Directory.Exists(repoPath))
+                    {
+                        return repoPath;
+                    }
+                }
+            }
+
+            return GetGeneralNotesFolder();
+        }
+
+        /// <summary>
+        /// Returns all candidate directories to scan for open "- [ ] " To-Do items for the current thread.
+        /// </summary>
+        public string[] GetTodoScanFolders(string? activeThread = null, string? obsidianVaultPath = null)
+        {
+            var folders = new List<string>();
+            string primary = ResolveTodoFolder(activeThread);
+            if (!string.IsNullOrWhiteSpace(primary)) folders.Add(primary);
+
+            string generalNotes = GetGeneralNotesFolder();
+            if (!folders.Contains(generalNotes, StringComparer.OrdinalIgnoreCase))
+            {
+                folders.Add(generalNotes);
+            }
+
+            if (!string.IsNullOrWhiteSpace(activeThread) && !activeThread.Equals("General", StringComparison.OrdinalIgnoreCase))
+            {
+                string brainRepo = GetRepoBrainPath(activeThread);
+                if (!string.IsNullOrWhiteSpace(brainRepo) && !folders.Contains(brainRepo, StringComparer.OrdinalIgnoreCase))
+                {
+                    folders.Add(brainRepo);
+                }
+            }
+
+            foreach (var repoPath in LoadRepoMap().Values)
+            {
+                if (!string.IsNullOrWhiteSpace(repoPath) && Directory.Exists(repoPath) && !folders.Contains(repoPath, StringComparer.OrdinalIgnoreCase))
+                {
+                    folders.Add(repoPath);
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(obsidianVaultPath) && Directory.Exists(obsidianVaultPath) && !folders.Contains(obsidianVaultPath, StringComparer.OrdinalIgnoreCase))
+            {
+                folders.Add(obsidianVaultPath);
+            }
+
+            return folders.ToArray();
+        }
+
+        /// <summary>
         /// Sparar en säkerhetskopia av en fil i hjärnan innan Slime ändrar eller skriver över den.
         /// Kopiorna får ändelsen .bak så att de inte hamnar i anteckningssökningen. De 50 senaste per repo sparas.
         /// Returnerar false om kopian inte kunde skapas (då ska filen inte röras).

@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 
 namespace SlimeHelper
 {
@@ -18,6 +18,9 @@ namespace SlimeHelper
         /// Listar .md-filer under root utan att gå ner i uteslutna mappar (node_modules, bin, obj, .git ...)
         /// och utan att följa symlänkar/junctions.
         /// </summary>
+        public static IEnumerable<string> GetMarkdownFiles(string root) =>
+            EnumerateMarkdownFiles(root);
+
         private static IEnumerable<string> EnumerateMarkdownFiles(string root)
         {
             var pending = new Stack<string>();
@@ -112,40 +115,19 @@ namespace SlimeHelper
             return results;
         }
 
-        // 2. Scanner för oavslutade To-Dos
-        public static List<string> GetUnfinishedTodos(string vaultPath, int maxItems = 5)
+        // 2. Scanner for unfinished To-Dos across the vault and optional extra directories
+        public static List<string> GetUnfinishedTodos(string vaultPath, int maxItems = 5, params string?[] extraFolders)
         {
-            var todos = new List<string>();
-            if (string.IsNullOrWhiteSpace(vaultPath) || !Directory.Exists(vaultPath))
-                return todos;
-
-            try
+            var folders = new List<string?> { vaultPath };
+            if (extraFolders != null && extraFolders.Length > 0)
             {
-                foreach (var file in EnumerateMarkdownFiles(vaultPath))
-                {
-                    if (IsTooLarge(file))
-                        continue;
-
-                    var lines = File.ReadAllLines(file);
-                    foreach (var line in lines)
-                    {
-                        string trimmed = line.TrimStart();
-                        if (trimmed.StartsWith("- [ ]"))
-                        {
-                            string item = trimmed.Substring(5).Trim();
-                            if (!string.IsNullOrEmpty(item))
-                            {
-                                todos.Add(item);
-                                if (todos.Count >= maxItems)
-                                    return todos;
-                            }
-                        }
-                    }
-                }
+                folders.AddRange(extraFolders);
             }
-            catch { }
 
-            return todos;
+            return NotesManager.ListUnfinishedTodos(folders.ToArray())
+                               .Take(maxItems)
+                               .Select(t => t.Text)
+                               .ToList();
         }
 
         // 3. Scanner för Dagens Anteckning

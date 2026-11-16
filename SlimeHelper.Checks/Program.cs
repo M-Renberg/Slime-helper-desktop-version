@@ -62,6 +62,7 @@ namespace SlimeHelper.Checks
                 ToolExecutionSpecialistTests(brain, work);
                 await GitHubTests(work);
                 WatcherTests(work);
+                TodoAndFocusTests(brain, work);
             }
             finally
             {
@@ -989,6 +990,54 @@ namespace SlimeHelper.Checks
                   HasNoSurrogateEmojis(SlimeResponses.TerminalWindowResponses) &&
                   HasNoSurrogateEmojis(SlimeResponses.BrowserWindowResponses),
                   "Spoken response arrays contain no emojis");
+        }
+
+        // ------------------------------------------------------------------ Phase 3: Unified Markdown To-Do (- [ ])
+        static void TodoAndFocusTests(SlimeBrainManager brain, string work)
+        {
+            Console.WriteLine("\n== Phase 3: Unified Markdown To-Do (- [ ]) and SlimeBrain resolution");
+
+            string generalFolder = brain.ResolveTodoFolder("General");
+            Check(generalFolder.EndsWith(Path.Combine("brain", "Notes"), StringComparison.OrdinalIgnoreCase),
+                  "General thread resolves To-Do folder to SlimeBrain/Notes (never bin/Debug)", generalFolder);
+
+            string todoRepo = NewRepo(work, brain, "todorepo", out string todoTag);
+            File.WriteAllText(Path.Combine(todoRepo, ".gitignore"), "bin/\nobj/\n");
+
+            string resolvedRepo = brain.ResolveTodoFolder(todoTag);
+            Check(string.Equals(resolvedRepo, todoRepo, StringComparison.OrdinalIgnoreCase),
+                  "Bound repo thread resolves To-Do folder to repository root", resolvedRepo);
+
+            // Add tasks in repo and General
+            string repoNotesFile = NotesManager.AddTodo(resolvedRepo, "Fix authentication bug");
+            NotesManager.AddTodo(resolvedRepo, "add Write integration tests");
+            NotesManager.AddTodo(generalFolder, "Buy coffee beans");
+
+            Check(File.Exists(repoNotesFile), "AddTodo creates slime_notes.md in target folder");
+            Check(File.ReadAllText(Path.Combine(todoRepo, ".gitignore")).Contains("slime_notes.md"),
+                  "AddTodo ensures slime_notes.md is added to .gitignore");
+
+            string[] scanFolders = brain.GetTodoScanFolders(todoTag);
+            var openTodos = NotesManager.ListUnfinishedTodos(scanFolders);
+
+            Check(openTodos.Count == 3, "ListUnfinishedTodos finds repo + General tasks and ignores placeholders", $"count={openTodos.Count}");
+            Check(openTodos[0].Index == 1 && openTodos[0].Text == "Fix authentication bug", "Task #1 matches first repo task", openTodos[0].Text);
+            Check(openTodos[1].Index == 2 && openTodos[1].Text == "Write integration tests", "Task #2 strips leading 'add ' prefix", openTodos[1].Text);
+            Check(openTodos[2].Index == 3 && openTodos[2].Text == "Buy coffee beans", "Task #3 includes General SlimeBrain task", openTodos[2].Text);
+
+            // Complete task #1 (- [ ] -> - [x])
+            var (doneOk, completedText, doneErr) = NotesManager.CompleteTodo(1, scanFolders);
+            Check(doneOk && completedText == "Fix authentication bug", "CompleteTodo marks task #1 as done", doneErr);
+            Check(File.ReadAllText(repoNotesFile).Contains("- [x] Fix authentication bug"),
+                  "CompleteTodo rewrites '- [ ]' to '- [x]' in slime_notes.md");
+
+            var remainingTodos = NotesManager.ListUnfinishedTodos(scanFolders);
+            Check(remainingTodos.Count == 2 && remainingTodos[0].Text == "Write integration tests",
+                  "Completed task is excluded from unfinished list and remaining items re-index cleanly");
+
+            var obsidianList = ObsidianService.GetUnfinishedTodos("", 5, scanFolders);
+            Check(obsidianList.Count == 2 && obsidianList.Contains("Buy coffee beans"),
+                  "ObsidianService.GetUnfinishedTodos reads unified scan folders even when ObsidianVaultPath is empty");
         }
     }
 }

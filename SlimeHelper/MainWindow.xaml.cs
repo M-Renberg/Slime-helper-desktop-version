@@ -106,6 +106,12 @@ namespace SlimeHelper
         public event Action<string, string>? AiResponseReceived;
         public event Action<string>? AiErrorOccurred;
         public event Action<string, string, string>? AiUserMessageReceived;
+        public event Action<string>? FocusTimerCompleted;
+
+        // Phase 3: Focus / Pomodoro Timer state
+        private DispatcherTimer? _focusTimer;
+        private DateTime _focusEndTime = DateTime.MinValue;
+        private string? _focusTaskName = null;
 
         private static readonly HashSet<string> IgnoredHashDirectives = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -668,6 +674,86 @@ namespace SlimeHelper
             ShowTempMessage(msg, "SCARED", 4);
         }
 
+        public void NotifyTodoAdded(string taskText)
+        {
+            PlaySounds("Idle.wav");
+            TriggerImpact(1.2);
+            ShowTempMessage($"Added task: {taskText}", "NOTES", 4);
+        }
+
+        public void CelebrateTodoCompleted(string taskText)
+        {
+            PlaySounds("Idle.wav");
+            TriggerImpact(2.0);
+            ShowTempMessage($"Task completed: {taskText}! Great work!", "HURRAY", 5);
+        }
+
+        public (bool Started, string Message) StartFocusTimer(int minutes, string? taskName = null)
+        {
+            if (minutes <= 0 || minutes > 240)
+            {
+                return (false, "Focus duration must be between 1 and 240 minutes.");
+            }
+
+            _focusTimer?.Stop();
+            _focusEndTime = DateTime.Now.AddMinutes(minutes);
+            _focusTaskName = string.IsNullOrWhiteSpace(taskName) ? null : taskName.Trim();
+
+            _focusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            _focusTimer.Tick += (s, e) =>
+            {
+                if (DateTime.Now >= _focusEndTime)
+                {
+                    _focusTimer.Stop();
+                    string finishedTask = _focusTaskName != null ? $" on \"{_focusTaskName}\"" : "";
+                    _focusTaskName = null;
+                    _focusEndTime = DateTime.MinValue;
+
+                    PlaySounds("Poke.wav");
+                    TriggerImpact(2.0);
+                    string doneMsg = $"Focus session{finishedTask} complete! Time to stretch and grab some water.";
+                    ShowTempMessage(doneMsg, "HURRAY", 6);
+                    FocusTimerCompleted?.Invoke(doneMsg);
+                }
+            };
+            _focusTimer.Start();
+
+            PlaySounds("Idle.wav");
+            string startMsg = _focusTaskName != null
+                ? $"Focusing for {minutes} min on \"{_focusTaskName}\". You've got this!"
+                : $"Focus timer set for {minutes} min. Let's get to work!";
+            ShowTempMessage(startMsg, "NOTES", 4);
+            return (true, startMsg);
+        }
+
+        public string StopFocusTimer()
+        {
+            if (_focusTimer == null || !_focusTimer.IsEnabled || DateTime.Now >= _focusEndTime)
+            {
+                return "No active focus timer is running.";
+            }
+
+            _focusTimer.Stop();
+            string? task = _focusTaskName;
+            _focusTaskName = null;
+            _focusEndTime = DateTime.MinValue;
+
+            string msg = task != null
+                ? $"Stopped focus timer for \"{task}\"."
+                : "Stopped focus timer.";
+            ShowTempMessage(msg, "IDLE", 3);
+            return msg;
+        }
+
+        public (bool IsActive, TimeSpan Remaining, string? TaskName) GetFocusStatus()
+        {
+            if (_focusTimer != null && _focusTimer.IsEnabled && _focusEndTime > DateTime.Now)
+            {
+                return (true, _focusEndTime - DateTime.Now, _focusTaskName);
+            }
+            return (false, TimeSpan.Zero, null);
+        }
+
         private void CheckStatus(object? sender, EventArgs e)
         {
             RunStatusCheck();
@@ -1200,7 +1286,8 @@ namespace SlimeHelper
 
                 AiUserMessageReceived?.Invoke(activeThread, prompt, source);
 
-                string standardContext = ContextManager.BuildFullContext(settings, prompt, lastStatus);
+                var todoFolders = _brainManager.GetTodoScanFolders(activeThread, settings.ObsidianVaultPath);
+                string standardContext = ContextManager.BuildFullContext(settings, prompt, lastStatus, todoFolders);
                 string tagContext = "";
 
                 foreach (var path in boundPaths)

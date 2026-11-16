@@ -53,6 +53,7 @@ namespace SlimeHelper
             _mainWindow.AiResponseReceived += OnAiResponseReceived;
             _mainWindow.AiErrorOccurred += OnAiErrorOccurred;
             _mainWindow.AiUserMessageReceived += OnAiUserMessageReceived;
+            _mainWindow.FocusTimerCompleted += msg => Dispatcher.Invoke(() => AddSystemMessage($"⏱️ {msg}"));
 
             RefreshThreads();
             LoadHistoryForThread(CurrentThread);
@@ -201,9 +202,12 @@ namespace SlimeHelper
                     "💡 Slime Assistant Commands:\n\n" +
                     "• /help — Show this help text\n" +
                     "• /clear — Clear current chat screen\n" +
+                    "• /todo — List all open '- [ ]' To-Do items from slime_notes.md and Obsidian\n" +
+                    "• /todo <task> — Add a new '- [ ]' task to slime_notes.md\n" +
+                    "• /todo done <number> — Mark task #<number> as '- [x]' completed\n" +
+                    "• /focus <minutes> [task] — Start a Pomodoro focus timer (or /focus stop)\n" +
                     "• /skin <color> — Change skin (Blue/Default, Green, Pink, Girl)\n" +
                     "• /cal <event> — Add event to Google Calendar (e.g. /cal Meeting tomorrow at 14)\n" +
-                    "• /todo <task> — Add task to slime_notes.md\n" +
                     "• /notes — Open Obsidian or workspace notes\n" +
                     "• /bind <#tag> [path] — Bind a repository folder to a hashtag\n" +
                     "• /gh status — Show GitHub connection, current user, rate limits, and detected repo\n" +
@@ -262,32 +266,105 @@ namespace SlimeHelper
 
             if (lower.StartsWith("/todo"))
             {
+                var settings = _mainWindow.LoadFullSettings();
+                var scanFolders = _brainManager.GetTodoScanFolders(CurrentThread, settings.ObsidianVaultPath);
                 var parts = cmd.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length > 1)
-                {
-                    string task = parts[1];
-                    string targetFolder = Directory.GetCurrentDirectory();
-                    var repoMap = _brainManager.GetBoundRepos();
-                    if (repoMap.TryGetValue(CurrentThread, out var boundPath))
-                    {
-                        targetFolder = boundPath;
-                    }
+                string arg = parts.Length > 1 ? parts[1].Trim() : "";
 
-                    try
+                if (string.IsNullOrEmpty(arg) || arg.Equals("list", StringComparison.OrdinalIgnoreCase))
+                {
+                    var items = NotesManager.ListUnfinishedTodos(scanFolders);
+                    if (items.Count == 0)
                     {
-                        string notesPath = Path.Combine(targetFolder, "slime_notes.md");
-                        NotesManager.EnsureNotesInGitignore(targetFolder);
-                        File.AppendAllText(notesPath, $"- [ ] {task}\n");
-                        AddSystemMessage($"✔ Added to To-Do: \"{task}\" (in {Path.GetFileName(notesPath)})");
+                        AddSystemMessage("📝 No open To-Do items found! Add one with `/todo <task>`.");
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        AddSystemMessage($"❌ Could not save To-Do: {ex.Message}");
+                        var sb = new System.Text.StringBuilder();
+                        sb.AppendLine($"📝 Open To-Do Items ({items.Count}):\n");
+                        foreach (var item in items)
+                        {
+                            string fileLabel = Path.GetFileName(item.FilePath);
+                            sb.AppendLine($"{item.Index}. [ ] {item.Text}  ({fileLabel})");
+                        }
+                        sb.AppendLine("\nTip: Complete a task with `/todo done <number>`.");
+                        AddSystemMessage(sb.ToString().TrimEnd());
                     }
+                    return;
+                }
+
+                if (arg.StartsWith("done ", StringComparison.OrdinalIgnoreCase) || arg.StartsWith("check ", StringComparison.OrdinalIgnoreCase))
+                {
+                    string numPart = arg.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries).Skip(1).FirstOrDefault() ?? "";
+                    if (int.TryParse(numPart.TrimStart('#'), out int index))
+                    {
+                        var (ok, completedText, err) = NotesManager.CompleteTodo(index, scanFolders);
+                        if (ok)
+                        {
+                            _mainWindow.CelebrateTodoCompleted(completedText);
+                            AddSystemMessage($"✔ Marked #{index} as done (- [x]): \"{completedText}\"");
+                        }
+                        else
+                        {
+                            AddSystemMessage($"❌ {err}");
+                        }
+                    }
+                    else
+                    {
+                        AddSystemMessage("Usage: /todo done <task_number> (run `/todo` to see numbers)");
+                    }
+                    return;
+                }
+
+                try
+                {
+                    string targetFolder = _brainManager.ResolveTodoFolder(CurrentThread);
+                    string notesPath = NotesManager.AddTodo(targetFolder, arg);
+                    string cleanTask = arg.StartsWith("add ", StringComparison.OrdinalIgnoreCase) && arg.Length > 4 ? arg[4..].Trim() : arg;
+                    _mainWindow.NotifyTodoAdded(cleanTask);
+                    AddSystemMessage($"✔ Added to To-Do: \"{cleanTask}\" (in {Path.GetFileName(notesPath)})");
+                }
+                catch (Exception ex)
+                {
+                    AddSystemMessage($"❌ Could not save To-Do: {ex.Message}");
+                }
+                return;
+            }
+
+            if (lower.StartsWith("/focus"))
+            {
+                var parts = cmd.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 1 || parts[1].Equals("status", StringComparison.OrdinalIgnoreCase))
+                {
+                    var (isActive, remaining, taskName) = _mainWindow.GetFocusStatus();
+                    if (isActive)
+                    {
+                        string taskSuffix = !string.IsNullOrEmpty(taskName) ? $" on \"{taskName}\"" : "";
+                        AddSystemMessage($"⏱️ Focus timer active{taskSuffix}: {(int)remaining.TotalMinutes}m {remaining.Seconds}s remaining.");
+                    }
+                    else
+                    {
+                        AddSystemMessage("⏱️ No focus timer running. Start one with `/focus <minutes> [optional task]` (e.g. `/focus 25 Fix login`).");
+                    }
+                    return;
+                }
+
+                if (parts[1].Equals("stop", StringComparison.OrdinalIgnoreCase) || parts[1].Equals("cancel", StringComparison.OrdinalIgnoreCase))
+                {
+                    string stopMsg = _mainWindow.StopFocusTimer();
+                    AddSystemMessage($"⏱️ {stopMsg}");
+                    return;
+                }
+
+                if (int.TryParse(parts[1], out int minutes))
+                {
+                    string? taskName = parts.Length > 2 ? parts[2] : null;
+                    var (started, msg) = _mainWindow.StartFocusTimer(minutes, taskName);
+                    AddSystemMessage(started ? $"⏱️ {msg}" : $"❌ {msg}");
                 }
                 else
                 {
-                    AddSystemMessage("Usage: /todo <your task description>");
+                    AddSystemMessage("Usage: `/focus <minutes> [task]` or `/focus stop`");
                 }
                 return;
             }
