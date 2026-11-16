@@ -107,11 +107,15 @@ namespace SlimeHelper
         public event Action<string>? AiErrorOccurred;
         public event Action<string, string, string>? AiUserMessageReceived;
         public event Action<string>? FocusTimerCompleted;
+        public event Action<SlimeMemory>? MoodChanged;
 
         // Phase 3: Focus / Pomodoro Timer state
         private DispatcherTimer? _focusTimer;
         private DateTime _focusEndTime = DateTime.MinValue;
         private string? _focusTaskName = null;
+
+        // Phase 5: Mood & Energy state
+        private double _currentBreathingMultiplier = 1.0;
 
         private static readonly HashSet<string> IgnoredHashDirectives = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -208,6 +212,33 @@ namespace SlimeHelper
             checkTimer.Tick += CheckStatus;
             checkTimer.Start();
 
+            _activityWatcher.CustomIdleChatterProvider = (now, random) =>
+            {
+                try
+                {
+                    var currentSettings = LoadFullSettings();
+                    string activeThread = _chatWindow?.CurrentThread ?? "General";
+                    string[] scanFolders = _brainManager.GetTodoScanFolders(activeThread, currentSettings.ObsidianVaultPath);
+                    var openTodos = NotesManager.ListUnfinishedTodos(scanFolders).Select(t => t.Text).ToList();
+                    var memory = _brainManager.LoadMemory();
+                    var boundTags = _brainManager.GetBoundRepos().Keys.ToList();
+                    var (isFocusActive, focusRemaining, focusTask) = GetFocusStatus();
+                    int remMins = isFocusActive ? Math.Max(1, (int)Math.Ceiling(focusRemaining.TotalMinutes)) : 0;
+
+                    return SlimeResponses.PickContextualIdleChatter(
+                        now,
+                        random,
+                        openTodos,
+                        memory.Nodes,
+                        boundTags,
+                        (isFocusActive, remMins, focusTask),
+                        (memory.Mood, memory.Energy));
+                }
+                catch
+                {
+                    return SlimeResponses.PickIdleChatter(now, random);
+                }
+            };
             _activityWatcher.OnReaction += (status, msg) => HandleWatcherReaction(status, msg);
             _codeWatcher.OnReaction += (status, msg) => HandleWatcherReaction(status, msg);
             _wordWatcher.RegisterInstance();
@@ -234,6 +265,7 @@ namespace SlimeHelper
                 {
                     _lastFailedRun = run;
                     _lastFailedLogSnippet = logSnippet;
+                    RecordMoodEvent("CI_FAILURE");
                     PlaySounds("Warning.wav");
                     string failureMsg = $"CI failed on {run.Name} ({run.HeadBranch})!\nClick to inspect failure.";
                     ShowTempMessage(failureMsg, "ERROR", 8);
@@ -244,6 +276,7 @@ namespace SlimeHelper
             {
                 Dispatcher.Invoke(() =>
                 {
+                    RecordMoodEvent("CI_SUCCESS");
                     PlaySounds("Idle.wav");
                     string successMsg = $"CI passed on {run.Name} ({run.HeadBranch})!";
                     ShowTempMessage(successMsg, "HURRAY", 6);
@@ -402,6 +435,7 @@ namespace SlimeHelper
                     _isAfkSleeping = true;
                     _interactionTimer?.Stop();
                     isInteracting = true; // blocks status-file polling and idle flavor while asleep
+                    RecordMoodEvent("SLEEP");
                     ShowSlimeReaction("SLEEP", msg);
                     HideBubbleAfterDelay(4);
                     return;
@@ -420,6 +454,14 @@ namespace SlimeHelper
                 {
                     if ((DateTime.Now - _lastRandomChatter).TotalMinutes < 10) return;
                     _lastRandomChatter = DateTime.Now;
+                }
+
+                if (!isIdleChatter)
+                {
+                    if (status == "STREAK") RecordMoodEvent("STREAK");
+                    else if (status == "BREAK") RecordMoodEvent("BREAK");
+                    else if (status == "ANNOYED") RecordMoodEvent("SWEAR");
+                    else if (status == "TIRED") RecordMoodEvent("HIGH_CPU");
                 }
 
                 if (!string.IsNullOrEmpty(msg))
@@ -653,6 +695,7 @@ namespace SlimeHelper
             _lastPokeAt = now;
 
             var (emotion, phrase, impact, emote) = SlimeResponses.GetPokeComboReaction(_pokeStreak, currentSkin, rng);
+            RecordMoodEvent(_pokeStreak <= 2 ? "POKE_GENTLE" : "POKE_SPAM");
 
             PlaySounds(emotion == "SCARED" ? "Warning.wav" : "Poke.wav");
             TriggerImpact(impact);
@@ -667,11 +710,32 @@ namespace SlimeHelper
         {
             if (_isAsleep || _isAfkSleeping || _isAiBusy) return;
 
+            RecordMoodEvent("POKE_SPAM");
             PlaySounds("Warning.wav");
             TriggerImpact(2.8);
             SpawnEmoteBurst("💫", 5, spin: true);
             string msg = SlimeResponses.PickRandom(SlimeResponses.WindowShakeResponses);
             ShowTempMessage(msg, "SCARED", 4);
+        }
+
+        public void RecordMoodEvent(string eventType)
+        {
+            try
+            {
+                var memory = _brainManager.LoadMemory();
+                memory.ApplyEvent(eventType);
+                _brainManager.SaveMemory(memory);
+                _currentBreathingMultiplier = memory.GetBreathingSpeedMultiplier();
+                MoodChanged?.Invoke(memory);
+            }
+            catch { }
+        }
+
+        public SlimeMemory GetCurrentMoodMemory()
+        {
+            var memory = _brainManager.LoadMemory();
+            _currentBreathingMultiplier = memory.GetBreathingSpeedMultiplier();
+            return memory;
         }
 
         public void NotifyTodoAdded(string taskText)
@@ -683,6 +747,7 @@ namespace SlimeHelper
 
         public void CelebrateTodoCompleted(string taskText)
         {
+            RecordMoodEvent("TODO_DONE");
             PlaySounds("Idle.wav");
             TriggerImpact(2.0);
             ShowTempMessage($"Task completed: {taskText}! Great work!", "HURRAY", 5);
@@ -1173,6 +1238,7 @@ namespace SlimeHelper
             isInteracting = true;
             _isAiBusy = true;
             _interactionTimer?.Stop();
+            RecordMoodEvent("CHAT");
             string response = "";
 
             SpeechText.Text = "Hmm... let me think...";
@@ -1923,9 +1989,10 @@ namespace SlimeHelper
         {
             double t = _motionClock.Elapsed.TotalSeconds;
 
-            // Continuous breathing – runs across all states
-            double breathScale = 1.0 + Math.Sin(t * 1.6) * 0.015;
-            double breathY = Math.Sin(t * 1.6) * 1.5;
+            // Continuous breathing – runs across all states, scaled by Phase 5 Mood/Energy multiplier
+            double breathFreq = 1.6 * _currentBreathingMultiplier;
+            double breathScale = 1.0 + Math.Sin(t * breathFreq) * 0.015;
+            double breathY = Math.Sin(t * breathFreq) * 1.5;
 
             // Impact pulse: damped spring bouncing back toward 0
             const double stiffness = 220.0, damping = 18.0, dt = 0.016;

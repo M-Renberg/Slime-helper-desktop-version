@@ -43,8 +43,81 @@ namespace SlimeHelper
     {
         public string UserName { get; set; } = "Master";
         public string CurrentProject { get; set; } = "Unknown";
+        public int Mood { get; set; } = 80;
+        public int Energy { get; set; } = 85;
         public List<string> Facts { get; set; } = new();
         public List<MemoryNode> Nodes { get; set; } = new();
+
+        /// <summary>
+        /// Phase 5: Adjusts Slime's Mood and Energy within [0..100].
+        /// </summary>
+        public void AdjustMoodAndEnergy(int moodDelta, int energyDelta)
+        {
+            Mood = Math.Clamp(Mood + moodDelta, 0, 100);
+            Energy = Math.Clamp(Energy + energyDelta, 0, 100);
+        }
+
+        /// <summary>
+        /// Phase 5: Applies a named interaction or workspace event to Slime's Mood and Energy.
+        /// </summary>
+        public void ApplyEvent(string eventType)
+        {
+            switch ((eventType ?? "").Trim().ToUpperInvariant())
+            {
+                case "TODO_DONE":
+                    AdjustMoodAndEnergy(+10, +4);
+                    break;
+                case "CI_SUCCESS":
+                    AdjustMoodAndEnergy(+12, +5);
+                    break;
+                case "CI_FAILURE":
+                    AdjustMoodAndEnergy(-10, -4);
+                    break;
+                case "STREAK":
+                    AdjustMoodAndEnergy(+6, -3);
+                    break;
+                case "CHAT":
+                    AdjustMoodAndEnergy(+4, -1);
+                    break;
+                case "POKE_GENTLE":
+                    AdjustMoodAndEnergy(+2, 0);
+                    break;
+                case "POKE_SPAM":
+                    AdjustMoodAndEnergy(-8, -5);
+                    break;
+                case "SWEAR":
+                    AdjustMoodAndEnergy(-5, -1);
+                    break;
+                case "REST":
+                case "SLEEP":
+                case "BREAK":
+                    AdjustMoodAndEnergy(+4, +15);
+                    break;
+                case "HIGH_CPU":
+                case "LATE_NIGHT":
+                    AdjustMoodAndEnergy(-2, -6);
+                    break;
+            }
+        }
+
+        public string GetMoodLabel()
+        {
+            if (Energy < 25) return "Sleepy";
+            if (Mood >= 80) return "Happy";
+            if (Mood >= 55) return "Content";
+            if (Mood >= 35) return "Grumpy";
+            return "Stressed";
+        }
+
+        public double GetBreathingSpeedMultiplier()
+        {
+            if (Energy < 30) return 0.72;
+            if (Mood >= 80 && Energy >= 50) return 1.22;
+            return 1.0;
+        }
+
+        public string GetStatusSummary() =>
+            $"Mood: {GetMoodLabel()} ({Mood}%) | Energy: {Energy}%";
 
         /// <summary>
         /// Adds or updates a memory node by key (case-insensitive).

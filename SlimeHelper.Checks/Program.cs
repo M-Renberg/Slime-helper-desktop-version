@@ -1038,6 +1038,102 @@ namespace SlimeHelper.Checks
             var obsidianList = ObsidianService.GetUnfinishedTodos("", 5, scanFolders);
             Check(obsidianList.Count == 2 && obsidianList.Contains("Buy coffee beans"),
                   "ObsidianService.GetUnfinishedTodos reads unified scan folders even when ObsidianVaultPath is empty");
+
+            // Phase 4: Contextual & Memory-based Idle Chatter
+            Console.WriteLine("\n== Phase 4: Memory-based and contextual IdleThoughts");
+            var midDay = new DateTime(2026, 11, 18, 14, 0, 0); // Wednesday afternoon
+            var rng4 = new Random(7);
+
+            bool sawFocusChatter = false;
+            for (int i = 0; i < 20; i++)
+            {
+                var (st, m) = SlimeResponses.PickContextualIdleChatter(
+                    midDay, rng4,
+                    focusStatus: (true, 18, "Refactor Auth"));
+                if (st == "NOTES" && m.Contains("Refactor Auth") && m.Contains("18 min"))
+                {
+                    sawFocusChatter = true;
+                    break;
+                }
+            }
+            Check(sawFocusChatter, "PickContextualIdleChatter surfaces active Focus timer reminder");
+
+            bool sawTodoChatter = false;
+            for (int i = 0; i < 30; i++)
+            {
+                var (st, m) = SlimeResponses.PickContextualIdleChatter(
+                    midDay, rng4,
+                    openTodos: new[] { "Write integration tests" });
+                if (st == "NOTES" && m.Contains("Write integration tests") && !m.Any(char.IsSurrogate))
+                {
+                    sawTodoChatter = true;
+                    break;
+                }
+            }
+            Check(sawTodoChatter, "PickContextualIdleChatter surfaces open To-Do reminder without emojis");
+
+            bool sawMemoryChatter = false;
+            var sampleNodes = new List<MemoryNode>
+            {
+                new MemoryNode
+                {
+                    Key = "wpf_arch",
+                    Category = MemoryCategory.Architecture,
+                    Content = "Use 60 FPS spring physics in UpdateMotion",
+                    RelatedRepoOrTag = "#slime-girl"
+                }
+            };
+            for (int i = 0; i < 30; i++)
+            {
+                var (st, m) = SlimeResponses.PickContextualIdleChatter(
+                    midDay, rng4,
+                    memoryNodes: sampleNodes);
+                if (st == "THINKING" && m.Contains("#slime-girl") && m.Contains("UpdateMotion") && !m.Any(char.IsSurrogate))
+                {
+                    sawMemoryChatter = true;
+                    break;
+                }
+            }
+            Check(sawMemoryChatter, "PickContextualIdleChatter surfaces SlimeMemory node thoughts without emojis");
+
+            bool sawRepoChatter = false;
+            for (int i = 0; i < 40; i++)
+            {
+                var (st, m) = SlimeResponses.PickContextualIdleChatter(
+                    midDay, rng4,
+                    boundRepoTags: new[] { "#slime-girl" });
+                if (st == "CUTE" && m.Contains("#slime-girl") && !m.Any(char.IsSurrogate))
+                {
+                    sawRepoChatter = true;
+                    break;
+                }
+            }
+            Check(sawRepoChatter, "PickContextualIdleChatter surfaces bound repository check-in without emojis");
+
+            // Phase 5: Mood & Energy System (Tamagotchi feel)
+            Console.WriteLine("\n== Phase 5: Mood and Energy system");
+            var moodMem = new SlimeMemory();
+            Check(moodMem.Mood == 80 && moodMem.Energy == 85 && moodMem.GetMoodLabel() == "Happy", "Default SlimeMemory starts Happy (80% Mood, 85% Energy)");
+            Check(moodMem.GetBreathingSpeedMultiplier() > 1.0, "High mood & energy increases breathing speed multiplier");
+
+            moodMem.ApplyEvent("TODO_DONE");
+            Check(moodMem.Mood == 90 && moodMem.Energy == 89, "TODO_DONE boosts Mood and Energy", moodMem.GetStatusSummary());
+
+            moodMem.ApplyEvent("CI_SUCCESS");
+            Check(moodMem.Mood == 100 && moodMem.Energy == 94, "CI_SUCCESS boosts Mood and clamps at 100", moodMem.GetStatusSummary());
+
+            for (int i = 0; i < 8; i++) moodMem.ApplyEvent("POKE_SPAM");
+            Check(moodMem.Mood == 36 && moodMem.GetMoodLabel() == "Grumpy", "Repeated POKE_SPAM lowers Mood to Grumpy", moodMem.GetStatusSummary());
+
+            moodMem.ApplyEvent("CI_FAILURE");
+            Check(moodMem.Mood == 26 && moodMem.GetMoodLabel() == "Stressed", "CI_FAILURE drops Mood into Stressed state", moodMem.GetStatusSummary());
+
+            moodMem.AdjustMoodAndEnergy(0, -40);
+            Check(moodMem.Energy < 25 && moodMem.GetMoodLabel() == "Sleepy" && moodMem.GetBreathingSpeedMultiplier() < 1.0,
+                  "Low Energy (< 25) enters Sleepy state and slows breathing speed multiplier", moodMem.GetStatusSummary());
+
+            moodMem.ApplyEvent("REST");
+            Check(moodMem.Energy >= 25, "REST event restores Energy", moodMem.GetStatusSummary());
         }
     }
 }

@@ -35,6 +35,125 @@ namespace SlimeHelper
             return (selectedReaction, randomThought);
         }
 
+        /// <summary>
+        /// Phase 4: Generates contextual, memory-aware, emoji-free idle thoughts based on active focus timers,
+        /// time of day, open Markdown To-Do items, SlimeMemory nodes, and bound repositories.
+        /// </summary>
+        public static (string Status, string Message) PickContextualIdleChatter(
+            DateTime now,
+            Random rng,
+            IReadOnlyList<string>? openTodos = null,
+            IReadOnlyList<MemoryNode>? memoryNodes = null,
+            IReadOnlyList<string>? boundRepoTags = null,
+            (bool IsActive, int RemainingMinutes, string? TaskName)? focusStatus = null,
+            (int Mood, int Energy)? moodState = null)
+        {
+            static string Shorten(string text, int maxLen = 65)
+            {
+                text = (text ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+                return text.Length <= maxLen ? text : text[..(maxLen - 3)].TrimEnd() + "...";
+            }
+
+            // 1. Active Pomodoro / Focus session reminder
+            if (focusStatus.HasValue && focusStatus.Value.IsActive && focusStatus.Value.RemainingMinutes > 0 && rng.Next(0, 2) == 0)
+            {
+                int mins = focusStatus.Value.RemainingMinutes;
+                string? task = focusStatus.Value.TaskName;
+                string msg = !string.IsNullOrWhiteSpace(task)
+                    ? $"Stay focused on '{Shorten(task, 45)}'! About {mins} min left on the timer."
+                    : $"Focus session in progress! About {mins} min remaining on the timer.";
+                return ("NOTES", msg);
+            }
+
+            // 1b. Phase 5: Low energy or low mood idle reactions
+            if (moodState.HasValue)
+            {
+                if (moodState.Value.Energy < 25 && rng.Next(0, 2) == 0)
+                {
+                    return ("TIRED", "Feeling a bit low on energy... a short break or coffee would feel nice.");
+                }
+                if (moodState.Value.Mood < 35 && rng.Next(0, 2) == 0)
+                {
+                    return ("UNSURE", "Rough session so far, but we can turn these bugs around!");
+                }
+            }
+
+            // 2. Time-of-day reactions (late night, Friday afternoon, Monday morning, weekend)
+            if (now.Hour is >= 23 or < 5 && rng.Next(0, 3) == 0)
+            {
+                return ("TIRED", "It's late. Slime is tired...");
+            }
+            if (now.DayOfWeek == DayOfWeek.Friday && now.Hour >= 15 && rng.Next(0, 3) == 0)
+            {
+                return ("STREAK", "It's Friday! Friday! Yey!");
+            }
+            if (now.DayOfWeek == DayOfWeek.Monday && now.Hour < 9 && rng.Next(0, 3) == 0)
+            {
+                return ("TIRED", "Monday... need coffee...");
+            }
+            if (now.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday && rng.Next(0, 4) == 0)
+            {
+                return ("UNSURE", "Working on the weekend? Really?");
+            }
+
+            // 3. Open Markdown To-Do item reminder
+            if (openTodos != null && openTodos.Count > 0 && rng.Next(0, 3) == 0)
+            {
+                string todo = Shorten(openTodos[rng.Next(openTodos.Count)], 60);
+                string[] templates =
+                {
+                    $"By the way, we still have '{todo}' on our To-Do list.",
+                    $"Don't forget about '{todo}' on your task list!",
+                    $"Should we tackle '{todo}' next?"
+                };
+                return ("NOTES", templates[rng.Next(templates.Length)]);
+            }
+
+            // 4. Memory Bank node recall (SlimeMemory)
+            if (memoryNodes != null && memoryNodes.Count > 0 && rng.Next(0, 3) == 0)
+            {
+                var candidates = memoryNodes.Where(n => !string.IsNullOrWhiteSpace(n.Content)).ToList();
+                if (candidates.Count > 0)
+                {
+                    var node = candidates[rng.Next(candidates.Count)];
+                    string snippet = Shorten(node.Content, 65);
+                    if (!string.IsNullOrWhiteSpace(node.RelatedRepoOrTag))
+                    {
+                        return ("THINKING", $"Thinking about {node.RelatedRepoOrTag}: {snippet}");
+                    }
+
+                    string msg = node.Category switch
+                    {
+                        MemoryCategory.UserPreference => $"I remember you mentioned: {snippet}",
+                        MemoryCategory.Architecture or MemoryCategory.ProjectDecision => $"Thinking about our design note: {snippet}",
+                        _ => $"Just recalling a note from my memory bank: {snippet}"
+                    };
+                    return ("THINKING", msg);
+                }
+            }
+
+            // 5. Bound Repository check-in
+            if (boundRepoTags != null && boundRepoTags.Count > 0 && rng.Next(0, 4) == 0)
+            {
+                string tag = boundRepoTags[rng.Next(boundRepoTags.Count)];
+                string[] repoTemplates =
+                {
+                    $"Making good progress in {tag} today!",
+                    $"How are things going in {tag}?",
+                    $"Ready whenever you need help with {tag}."
+                };
+                return ("CUTE", repoTemplates[rng.Next(repoTemplates.Length)]);
+            }
+
+            // 6. Fallback to standard idle thoughts (biased by Mood when high)
+            string randomThought = PickRandom(IdleThoughts);
+            string[] randomReactions = (moodState.HasValue && moodState.Value.Mood >= 80)
+                ? new[] { "CUTE", "HURRAY", "IDLE", "CUTE" }
+                : new[] { "IDLE", "CUTE", "THINKING", "HURRAY" };
+            string selectedReaction = randomReactions[rng.Next(randomReactions.Length)];
+            return (selectedReaction, randomThought);
+        }
+
         public static readonly string[] ConsoleResponses = new[]
         {
             "Writing in the console are we?",

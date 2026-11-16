@@ -141,7 +141,7 @@
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
-                    <!-- Icon & Title -->
+                    <!-- Icon & Title + Phase 5 Mood & Energy Badge -->
                     <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
                         <TextBlock Text="🟢" FontSize="15" Margin="0,0,8,0" VerticalAlignment="Center"/>
                         <TextBlock Text="Slime Assistant"
@@ -149,6 +149,19 @@
                                    FontWeight="Bold"
                                    Foreground="#F0F2F8"
                                    VerticalAlignment="Center"/>
+                        <Border Background="#262A3E"
+                                BorderBrush="#383E58"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                Padding="8,2"
+                                Margin="10,0,0,0"
+                                VerticalAlignment="Center">
+                            <TextBlock x:Name="MoodStatusText"
+                                       Text="Happy 80% • Energy 85%"
+                                       FontSize="10.5"
+                                       FontWeight="SemiBold"
+                                       Foreground="#A5B4FC"/>
+                        </Border>
                     </StackPanel>
 
                     <!-- Empty space for window dragging (handled by WindowChrome) -->
@@ -319,6 +332,7 @@
                 <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                     <StackPanel Orientation="Horizontal">
                         <Button Content="❓ /help" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/help"/>
+                        <Button Content="💖 /mood" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/mood"/>
                         <Button Content="📝 /todo" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/todo"/>
                         <Button Content="✅ /todo done" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/todo done "/>
                         <Button Content="⏱️ /focus 25" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/focus 25"/>

@@ -30,6 +30,11 @@ namespace SlimeHelper
         /// </summary>
         public string? ActiveRepoPath { get; set; }
 
+        /// <summary>
+        /// Optional provider for Phase 4 contextual idle chatter (connected to SlimeBrainManager and Focus Timer).
+        /// </summary>
+        public Func<DateTime, Random, (string Status, string Message)>? CustomIdleChatterProvider { get; set; }
+
         private readonly DispatcherTimer _idleTalkTimer;
 
         private static IntPtr _hookID = IntPtr.Zero;
@@ -56,7 +61,9 @@ namespace SlimeHelper
             {
                 if (!_isCurrentlyAfk)
                 {
-                    var (selectedReaction, randomThought) = PickIdleChatter(DateTime.Now, _rng);
+                    var (selectedReaction, randomThought) = CustomIdleChatterProvider != null
+                        ? CustomIdleChatterProvider(DateTime.Now, _rng)
+                        : PickIdleChatter(DateTime.Now, _rng);
 
                     // Prefix with IDLE_CHAT: so MainWindow enforces the chatter cooldown across all emotions
                     OnReaction?.Invoke($"IDLE_CHAT:{selectedReaction}", randomThought);

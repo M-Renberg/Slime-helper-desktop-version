@@ -54,7 +54,9 @@ namespace SlimeHelper
             _mainWindow.AiErrorOccurred += OnAiErrorOccurred;
             _mainWindow.AiUserMessageReceived += OnAiUserMessageReceived;
             _mainWindow.FocusTimerCompleted += msg => Dispatcher.Invoke(() => AddSystemMessage($"⏱️ {msg}"));
+            _mainWindow.MoodChanged += mem => Dispatcher.Invoke(() => UpdateMoodUI(mem));
 
+            UpdateMoodUI(_mainWindow.GetCurrentMoodMemory());
             RefreshThreads();
             LoadHistoryForThread(CurrentThread);
 
@@ -91,6 +93,12 @@ namespace SlimeHelper
             }
 
             UpdateThreadHint();
+        }
+
+        private void UpdateMoodUI(SlimeMemory memory)
+        {
+            if (MoodStatusText == null || memory == null) return;
+            MoodStatusText.Text = $"{memory.GetMoodLabel()} {memory.Mood}% • Energy {memory.Energy}%";
         }
 
         private void UpdateThreadHint()
@@ -206,6 +214,7 @@ namespace SlimeHelper
                     "• /todo <task> — Add a new '- [ ]' task to slime_notes.md\n" +
                     "• /todo done <number> — Mark task #<number> as '- [x]' completed\n" +
                     "• /focus <minutes> [task] — Start a Pomodoro focus timer (or /focus stop)\n" +
+                    "• /mood [rest] — Show Slime's current Mood & Energy (or give her a coffee/rest boost)\n" +
                     "• /skin <color> — Change skin (Blue/Default, Green, Pink, Girl)\n" +
                     "• /cal <event> — Add event to Google Calendar (e.g. /cal Meeting tomorrow at 14)\n" +
                     "• /notes — Open Obsidian or workspace notes\n" +
@@ -366,6 +375,24 @@ namespace SlimeHelper
                 {
                     AddSystemMessage("Usage: `/focus <minutes> [task]` or `/focus stop`");
                 }
+                return;
+            }
+
+            if (lower.StartsWith("/mood"))
+            {
+                var parts = cmd.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length > 1 && (parts[1].Equals("rest", StringComparison.OrdinalIgnoreCase) || parts[1].Equals("coffee", StringComparison.OrdinalIgnoreCase)))
+                {
+                    _mainWindow.RecordMoodEvent("REST");
+                    var updated = _mainWindow.GetCurrentMoodMemory();
+                    UpdateMoodUI(updated);
+                    AddSystemMessage($"☕ Gave Slime a rest & coffee boost! {updated.GetStatusSummary()}");
+                    return;
+                }
+
+                var mem = _mainWindow.GetCurrentMoodMemory();
+                UpdateMoodUI(mem);
+                AddSystemMessage($"💖 {mem.GetStatusSummary()}\nTip: Complete tasks (`/todo done`), pass CI builds, or run `/mood rest` to boost Slime's mood and energy!");
                 return;
             }
 
