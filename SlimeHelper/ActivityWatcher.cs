@@ -1,6 +1,7 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Threading;
 
 namespace SlimeHelper
@@ -12,6 +13,15 @@ namespace SlimeHelper
         private int _streakMinutes = 0;
         private bool _isCurrentlyAfk = false;
         private int _gitCheckCounter = 0;
+
+        // Phase 2: Contextual awareness (Active Window & CPU load)
+        private string? _lastWindowCategory = null;
+        private readonly Dictionary<string, DateTime> _lastCategoryReactionAt = new(StringComparer.OrdinalIgnoreCase);
+        private ulong _prevIdleTime = 0;
+        private ulong _prevKernelTime = 0;
+        private ulong _prevUserTime = 0;
+        private int _highCpuConsecutiveChecks = 0;
+        private DateTime _lastHighCpuReactionAt = DateTime.MinValue;
 
         public event Action<string, string>? OnReaction;
 
@@ -108,6 +118,115 @@ namespace SlimeHelper
             {
                 _streakMinutes = 0;
             }
+
+            // Phase 2: Check CPU load and foreground window context
+            if (CheckHighCpuLoad())
+            {
+                return;
+            }
+
+            CheckForegroundWindowContext();
+        }
+
+        private bool CheckHighCpuLoad()
+        {
+            try
+            {
+                if (!GetSystemTimes(out ulong idle, out ulong kernel, out ulong user))
+                    return false;
+
+                if (_prevKernelTime == 0 && _prevUserTime == 0)
+                {
+                    _prevIdleTime = idle;
+                    _prevKernelTime = kernel;
+                    _prevUserTime = user;
+                    return false;
+                }
+
+                ulong idleDelta = idle - _prevIdleTime;
+                ulong kernelDelta = kernel - _prevKernelTime;
+                ulong userDelta = user - _prevUserTime;
+                ulong totalSystem = kernelDelta + userDelta;
+
+                _prevIdleTime = idle;
+                _prevKernelTime = kernel;
+                _prevUserTime = user;
+
+                if (totalSystem == 0) return false;
+
+                double cpuUsage = 100.0 * (1.0 - ((double)idleDelta / totalSystem));
+                if (cpuUsage >= 85.0)
+                {
+                    _highCpuConsecutiveChecks++;
+                    if (_highCpuConsecutiveChecks >= 2 && (DateTime.Now - _lastHighCpuReactionAt).TotalMinutes >= 10)
+                    {
+                        _highCpuConsecutiveChecks = 0;
+                        _lastHighCpuReactionAt = DateTime.Now;
+                        var reaction = SlimeResponses.GetContextReaction("HIGH_CPU", _rng);
+                        if (reaction.HasValue)
+                        {
+                            OnReaction?.Invoke(reaction.Value.Status, reaction.Value.Message);
+                            return true;
+                        }
+                    }
+                }
+                else
+                {
+                    _highCpuConsecutiveChecks = 0;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private void CheckForegroundWindowContext()
+        {
+            try
+            {
+                IntPtr hwnd = GetForegroundWindow();
+                if (hwnd == IntPtr.Zero) return;
+
+                var sb = new StringBuilder(256);
+                _ = GetWindowText(hwnd, sb, sb.Capacity);
+                string windowTitle = sb.ToString();
+
+                _ = GetWindowThreadProcessId(hwnd, out uint pid);
+                string processName = "";
+                if (pid != 0)
+                {
+                    try
+                    {
+                        using var proc = Process.GetProcessById((int)pid);
+                        processName = proc.ProcessName;
+                    }
+                    catch { }
+                }
+
+                string? category = SlimeResponses.ClassifyActiveWindow(processName, windowTitle);
+                if (string.IsNullOrEmpty(category))
+                {
+                    _lastWindowCategory = null;
+                    return;
+                }
+
+                // Trigger only when switching into a new category and respecting a 15-minute per-category cooldown
+                if (!string.Equals(category, _lastWindowCategory, StringComparison.OrdinalIgnoreCase))
+                {
+                    _lastWindowCategory = category;
+                    var now = DateTime.Now;
+                    if (!_lastCategoryReactionAt.TryGetValue(category, out var lastAt) || (now - lastAt).TotalMinutes >= 15)
+                    {
+                        _lastCategoryReactionAt[category] = now;
+                        var reaction = SlimeResponses.GetContextReaction(category, _rng);
+                        if (reaction.HasValue)
+                        {
+                            OnReaction?.Invoke(reaction.Value.Status, reaction.Value.Message);
+                        }
+                    }
+                }
+            }
+            catch { }
         }
 
         public static string? ResolveGitRepoPath(string? configuredPath)
@@ -264,5 +383,18 @@ namespace SlimeHelper
 
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSystemTimes(out ulong lpIdleTime, out ulong lpKernelTime, out ulong lpUserTime);
     }
 }

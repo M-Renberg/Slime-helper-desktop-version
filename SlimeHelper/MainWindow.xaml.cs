@@ -68,6 +68,35 @@ namespace SlimeHelper
         private double _flavorAngle = 0;
         private double _flavorX = 0;
 
+        // Phase 1: Poke-Combo, Window Shake & Emote Particle state
+        private int _pokeStreak = 0;
+        private DateTime _lastPokeAt = DateTime.MinValue;
+        private bool _isDraggingWindow = false;
+        private double _lastDragX = 0;
+        private int _lastDragDir = 0;
+        private int _shakeReversals = 0;
+        private DateTime _firstShakeReversalAt = DateTime.MinValue;
+        private DateTime _lastShakeTriggeredAt = DateTime.MinValue;
+        private DateTime _nextSleepZzzAt = DateTime.MinValue;
+        private readonly List<EmoteParticle> _activeParticles = [];
+
+        private sealed class EmoteParticle
+        {
+            public required TextBlock Element { get; init; }
+            public required TranslateTransform Translate { get; init; }
+            public required RotateTransform Rotate { get; init; }
+            public required ScaleTransform Scale { get; init; }
+            public double X { get; set; }
+            public double Y { get; set; }
+            public double Vx { get; set; }
+            public double Vy { get; set; }
+            public double SpinSpeed { get; set; }
+            public double WavePhase { get; init; }
+            public double WaveAmplitude { get; init; }
+            public double Age { get; set; }
+            public double Lifetime { get; init; }
+        }
+
         //memoney
         private readonly SlimeBrainManager _brainManager = new();
 
@@ -200,7 +229,7 @@ namespace SlimeHelper
                     _lastFailedRun = run;
                     _lastFailedLogSnippet = logSnippet;
                     PlaySounds("Warning.wav");
-                    string failureMsg = $"CI failed on {run.Name} ({run.HeadBranch})! 🚨\nClick to inspect failure.";
+                    string failureMsg = $"CI failed on {run.Name} ({run.HeadBranch})!\nClick to inspect failure.";
                     ShowTempMessage(failureMsg, "ERROR", 8);
                 });
             };
@@ -210,7 +239,7 @@ namespace SlimeHelper
                 Dispatcher.Invoke(() =>
                 {
                     PlaySounds("Idle.wav");
-                    string successMsg = $"CI passed on {run.Name} ({run.HeadBranch})! 🎉";
+                    string successMsg = $"CI passed on {run.Name} ({run.HeadBranch})!";
                     ShowTempMessage(successMsg, "HURRAY", 6);
                 });
             };
@@ -221,11 +250,47 @@ namespace SlimeHelper
             _activityWatcher.ActiveRepoPath = initialGhPath;
             _gitHubWatcher.Start(initialGhPath, settings.GitHubToken);
 
-            // Drag function
+            // Drag function & Window Shake detection
+            LocationChanged += (s, e) =>
+            {
+                if (!_isDraggingWindow) return;
+                double dx = Left - _lastDragX;
+                if (Math.Abs(dx) < 8) return;
+
+                int dir = dx > 0 ? 1 : -1;
+                var now = DateTime.Now;
+                if (_lastDragDir != 0 && dir != _lastDragDir)
+                {
+                    if ((now - _firstShakeReversalAt).TotalMilliseconds > 700)
+                    {
+                        _shakeReversals = 1;
+                        _firstShakeReversalAt = now;
+                    }
+                    else
+                    {
+                        _shakeReversals++;
+                    }
+                }
+                _lastDragDir = dir;
+                _lastDragX = Left;
+            };
+
             MouseLeftButtonDown += (s, e) =>
             {
                 startWindowPos = new Point(Left, Top);
-                DragMove();
+                _isDraggingWindow = true;
+                _lastDragX = Left;
+                _lastDragDir = 0;
+                _shakeReversals = 0;
+                _firstShakeReversalAt = DateTime.Now;
+                try
+                {
+                    DragMove();
+                }
+                finally
+                {
+                    _isDraggingWindow = false;
+                }
             };
 
             MouseLeftButtonUp += (s, e) =>
@@ -233,7 +298,13 @@ namespace SlimeHelper
                 double distanceMoved = Math.Abs(Left - startWindowPos.X)
                                      + Math.Abs(Top - startWindowPos.Y);
 
-                if (distanceMoved < 5)
+                if (_shakeReversals >= 4 && (DateTime.Now - _lastShakeTriggeredAt).TotalSeconds > 2.5)
+                {
+                    _lastShakeTriggeredAt = DateTime.Now;
+                    _shakeReversals = 0;
+                    TriggerWindowShake();
+                }
+                else if (distanceMoved < 5)
                 {
                     PokeSlime();
                 }
@@ -564,39 +635,37 @@ namespace SlimeHelper
         {
             if (_isAsleep || _isAfkSleeping || _isAiBusy) return;
 
-            PlaySounds("Poke.wav");
-            TriggerImpact(1.6);
-
-            string[] pokePhrase = currentSkin switch
+            var now = DateTime.Now;
+            if ((now - _lastPokeAt).TotalSeconds <= 4.0)
             {
-                "Green" =>
-                [
-                    "Don't poke me!", "You'll get green goo on your cursor", "Wobble, Wobble",
-                    "Do I look like a jelly shot?", "I'm melting! I'm melting!", "Maybe we should go back to coding?",
-                    "Remember to drink water!", "JS or TS? That the question...", "POKE-E-MON", "Slime!", "Why are you poking me?!?!"
-                ],
-                "Pink" =>
-                [
-                    "Fluffy!", "Pink and cute", "Wanna take a break?", "Flowers and butterflies",
-                    "Don't poke me so hard!", "My antennas", "Bubble, Bubble", "I'm just chilling here!",
-                    "Your code is beautiful!", "Did we fix that bug?", "We should use a pink theme!"
-                ],
-                "Girl" =>
-                [
-                    "Don't poke me!", "Cute and Squishy", "Wanna take a break?", "Hey, cut it out!",
-                    "You make me wooble", "I'm gonna melt into the CPU", "Be nice mister", "I'm just chilling here!",
-                    "Your code is beautiful!", "Did we fix that bug?", "Maybe try to get some work done?"
-                ],
-                _ =>
-                [
-                    "Don't poke me!", "Get back to coding!", "Careful! I'm squishy...", "Is it time for a break?",
-                    "You should focus on your code", "Hey! Don't do that!", "I want cake...", "Squish!",
-                    "Maybe just one more poke?", "Have you saved and commited your code?", "Slime is doing slime stuff"
-                ]
-            };
+                _pokeStreak++;
+            }
+            else
+            {
+                _pokeStreak = 1;
+            }
+            _lastPokeAt = now;
 
-            int index = rng.Next(pokePhrase.Length);
-            ShowTempMessage(pokePhrase[index], "POKE", 4);
+            var (emotion, phrase, impact, emote) = SlimeResponses.GetPokeComboReaction(_pokeStreak, currentSkin, rng);
+
+            PlaySounds(emotion == "SCARED" ? "Warning.wav" : "Poke.wav");
+            TriggerImpact(impact);
+
+            int particleCount = _pokeStreak >= 5 ? 4 : (_pokeStreak >= 3 ? 3 : 2);
+            SpawnEmoteBurst(emote, particleCount, spin: _pokeStreak >= 5);
+
+            ShowTempMessage(phrase, emotion, 4);
+        }
+
+        private void TriggerWindowShake()
+        {
+            if (_isAsleep || _isAfkSleeping || _isAiBusy) return;
+
+            PlaySounds("Warning.wav");
+            TriggerImpact(2.8);
+            SpawnEmoteBurst("💫", 5, spin: true);
+            string msg = SlimeResponses.PickRandom(SlimeResponses.WindowShakeResponses);
+            ShowTempMessage(msg, "SCARED", 4);
         }
 
         private void CheckStatus(object? sender, EventArgs e)
@@ -638,7 +707,7 @@ namespace SlimeHelper
                                 var (ok, msg) = _brainManager.BindRepo(parts[0], parts[1]);
                                 if (ok)
                                 {
-                                    ShowTempMessage($"Bound {msg} to this folder! 🧠", "CUTE", 4);
+                                    ShowTempMessage($"Bound {msg} to this folder!", "CUTE", 4);
                                     PlaySounds("Idle.wav");
                                 }
                                 else
@@ -859,7 +928,7 @@ namespace SlimeHelper
                 };
                 System.Diagnostics.Process.Start(psi);
 
-                ShowTempMessage("Spawning CLI companion! 🚀", "FUNNY", 3);
+                ShowTempMessage("Spawning CLI companion!", "FUNNY", 3);
             }
             catch (Exception)
             {
@@ -924,7 +993,7 @@ namespace SlimeHelper
             string json = JsonSerializer.Serialize(settings, JsonOptions);
             File.WriteAllText(settingsPath, json);
 
-            ShowTempMessage("Gemini key saved to my settings! ✨", "IDLE", 3);
+            ShowTempMessage("Gemini key saved to my settings!", "IDLE", 3);
             PlaySounds("Idle.wav");
         }
 
@@ -1208,7 +1277,7 @@ namespace SlimeHelper
                 }
 
                 queryBuilder.AppendLine("\n[Language Requirement]");
-                queryBuilder.AppendLine("CRITICAL: You are Slime, an English-speaking AI desktop assistant. You must ALWAYS respond in English. Even if the user writes, asks, or prompts in Swedish or any other language, every response, explanation, and message from you MUST be exclusively in English. Never answer in Swedish.\n");
+                queryBuilder.AppendLine("CRITICAL: You are Slime, an English-speaking AI desktop assistant. You must ALWAYS respond in English and do not use emojis in what you say. Even if the user writes, asks, or prompts in Swedish or any other language, every response, explanation, and message from you MUST be exclusively in English without emojis. Never answer in Swedish.\n");
 
                 queryBuilder.AppendLine("\n[User Prompt]");
                 queryBuilder.AppendLine(prompt);
@@ -1289,7 +1358,7 @@ namespace SlimeHelper
                     loopBuilder.AppendLine(agentLog.ToString());
 
                     loopBuilder.AppendLine("[Instructions]");
-                    loopBuilder.AppendLine("- LANGUAGE: You must ALWAYS respond in English. Never reply in Swedish.");
+                    loopBuilder.AppendLine("- LANGUAGE: You must ALWAYS respond in English and never use emojis in what you say. Never reply in Swedish.");
                     if (SlimeToolManager.WriteFailureCount >= 3)
                     {
                         // Multiple edit failures occurred: instruct the model to stop retrying and report the issue to the user
@@ -1477,7 +1546,26 @@ namespace SlimeHelper
                     SpeechBubble.Visibility = Visibility.Visible;
                 }
 
-                _ = PlayAnimationLoop(status);
+                string upper = (status ?? "").ToUpperInvariant();
+                if (upper == "HURRAY")
+                {
+                    SpawnEmoteBurst("🎉", 3, spin: true);
+                    SpawnEmoteBurst("✨", 2);
+                }
+                else if (upper == "STREAK")
+                {
+                    SpawnEmoteBurst("✨", 3);
+                }
+                else if (upper == "CUTE")
+                {
+                    SpawnEmoteBurst("💖", 2);
+                }
+                else if (upper == "SCARED")
+                {
+                    SpawnEmoteBurst("💫", 3, spin: true);
+                }
+
+                _ = PlayAnimationLoop(upper);
             });
         }
 
@@ -1533,7 +1621,7 @@ namespace SlimeHelper
                 currentSettings.GitHubToken = token.Trim();
                 SaveFullSettings(currentSettings);
                 _gitHubWatcher.GitHubToken = currentSettings.GitHubToken;
-                ShowTempMessage("GitHub token saved! 🐙✨", "IDLE", 3);
+                ShowTempMessage("GitHub token saved!", "IDLE", 3);
                 PlaySounds("Idle.wav");
             }
         }
@@ -1547,7 +1635,7 @@ namespace SlimeHelper
                 currentSettings.GitHubToken = ghToken;
                 SaveFullSettings(currentSettings);
                 _gitHubWatcher.GitHubToken = ghToken;
-                ShowTempMessage("Auto-detected token from GitHub CLI! 🐙💻", "HURRAY", 4);
+                ShowTempMessage("Auto-detected token from GitHub CLI!", "HURRAY", 4);
                 PlaySounds("Idle.wav");
             }
             else
@@ -1565,12 +1653,12 @@ namespace SlimeHelper
             var (ok, user, rate) = await _gitHubWatcher.Service.TestConnectionAsync(token);
             if (ok)
             {
-                ShowTempMessage($"Connected as @{user}! (Rate remaining: {rate}) 🐙🎉", "HURRAY", 5);
+                ShowTempMessage($"Connected as @{user}! (Rate remaining: {rate})", "HURRAY", 5);
                 PlaySounds("Idle.wav");
             }
             else
             {
-                ShowTempMessage($"GitHub connection failed: {user} ❌", "ERROR", 5);
+                ShowTempMessage($"GitHub connection failed: {user}", "ERROR", 5);
                 PlaySounds("Warning.wav");
             }
         }
@@ -1656,7 +1744,7 @@ namespace SlimeHelper
                                 "3. Code for basic visualizations using Seaborn/Matplotlib.\n" +
                                 "Return ONLY valid JSON.";
 
-                ShowTempMessage("Slime is analyzing dataset... 📊", "WORKING", 4);
+                ShowTempMessage("Slime is analyzing dataset...", "WORKING", 4);
                 PlaySounds("Idle.wav");
 
                 // 3. Anropa AI-tjänsten (byt ut _aiService mot ditt faktiska fältnamn om det skiljer sig)
@@ -1720,8 +1808,22 @@ namespace SlimeHelper
 
         //animation
 
+        // TODO [Eye Tracking PNG Layer Split Specification]:
+        // Currently, all sprite frames in Images/<Skin>/<State>/*.png are flat single-layer PNGs
+        // with the eyes baked directly into the body/character bitmap.
+        // To enable true pupil/iris mouse-tracking in the future, split the IDLE (and optionally other) sprites
+        // into 3 transparent PNG layers exported at the exact same pixel dimensions (e.g. 1024x1024):
+        //   1. <frame>_base.png    - Body, face, mouth, and empty eye sockets / sclera base (NO pupils/irises).
+        //   2. <frame>_eyes.png    - ONLY the pupils/irises and eye specular highlights on a transparent canvas.
+        //                            In WPF, this Image layer will be placed between base and overlay and shifted
+        //                            by ±4..8 px along X/Y toward the cursor position read via GetCursorPos.
+        //   3. <frame>_overlay.png - Eyelashes, upper eyelids, eyebrows, blush, and hair bangs that sit in front
+        //                            of the eyes so the moving pupils clip naturally under the eyelids/hair.
+        // Recommended folder structure per skin: Images/<Skin>/IDLE/Layers/01_base.png, 01_eyes.png, 01_overlay.png.
+
         private void StartMotionLoop()
         {
+            _motionTimer?.Stop();
             _motionTimer = new DispatcherTimer(DispatcherPriority.Render)
             {
                 Interval = TimeSpan.FromMilliseconds(16) // ~60 fps
@@ -1734,17 +1836,17 @@ namespace SlimeHelper
         {
             double t = _motionClock.Elapsed.TotalSeconds;
 
-            // Kontinuerlig andning – körs alltid, oavsett vilken bild som visas
+            // Continuous breathing – runs across all states
             double breathScale = 1.0 + Math.Sin(t * 1.6) * 0.015;
             double breathY = Math.Sin(t * 1.6) * 1.5;
 
-            // Impact-puls: dämpad fjäder som studsar tillbaka mot 0
+            // Impact pulse: damped spring bouncing back toward 0
             const double stiffness = 220.0, damping = 18.0, dt = 0.016;
             double force = -stiffness * _impactOffset - damping * _impactVelocity;
             _impactVelocity += force * dt;
             _impactOffset += _impactVelocity * dt;
 
-            // Sällsynt idle-flavor (bara i IDLE, ingen ny konst behövs)
+            // Occasional idle flavor tilt (only in IDLE, no new art required)
             if (DateTime.Now >= _nextIdleFlavorAt && !isInteracting && _currentPlayingState == "IDLE")
             {
                 _ = PlayIdleFlavor();
@@ -1756,6 +1858,124 @@ namespace SlimeHelper
             SlimeTranslate.Y = breathY;
             SlimeTranslate.X = _flavorX;
             SlimeRotate.Angle = _flavorAngle;
+
+            // Periodic floating Zzz particles while sleeping
+            if ((_isAsleep || _isAfkSleeping || _currentPlayingState == "SLEEP") && DateTime.Now >= _nextSleepZzzAt)
+            {
+                SpawnEmoteBurst("💤", 1, spin: false, isSlowFloat: true);
+                _nextSleepZzzAt = DateTime.Now.AddSeconds(2.2);
+            }
+
+            UpdateEmoteParticles(dt);
+        }
+
+        private void SpawnEmoteBurst(string symbol, int count = 2, bool spin = false, bool isSlowFloat = false)
+        {
+            if (EmoteCanvas == null) return;
+
+            // Cap active particles to keep rendering lightweight
+            while (_activeParticles.Count > 18)
+            {
+                EmoteCanvas.Children.Remove(_activeParticles[0].Element);
+                _activeParticles.RemoveAt(0);
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                var scale = new ScaleTransform(0.6, 0.6);
+                var rotate = new RotateTransform(0);
+                var translate = new TranslateTransform(0, 0);
+                var transformGroup = new TransformGroup();
+                transformGroup.Children.Add(scale);
+                transformGroup.Children.Add(rotate);
+                transformGroup.Children.Add(translate);
+
+                var tb = new TextBlock
+                {
+                    Text = symbol,
+                    FontSize = isSlowFloat ? 18 : rng.Next(17, 23),
+                    IsHitTestVisible = false,
+                    RenderTransformOrigin = new Point(0.5, 0.5),
+                    RenderTransform = transformGroup,
+                    Opacity = 1.0
+                };
+
+                double startX = isSlowFloat
+                    ? 115 + rng.Next(-12, 18)
+                    : 85 + rng.Next(-35, 45);
+                double startY = isSlowFloat
+                    ? 35 + rng.Next(-8, 8)
+                    : 30 + rng.Next(-15, 25);
+
+                double vx = isSlowFloat
+                    ? rng.NextDouble() * 10 - 2
+                    : (rng.NextDouble() - 0.5) * 55;
+                double vy = isSlowFloat
+                    ? -22 - rng.NextDouble() * 8
+                    : -45 - rng.NextDouble() * 35;
+
+                translate.X = startX;
+                translate.Y = startY;
+
+                EmoteCanvas.Children.Add(tb);
+                _activeParticles.Add(new EmoteParticle
+                {
+                    Element = tb,
+                    Translate = translate,
+                    Rotate = rotate,
+                    Scale = scale,
+                    X = startX,
+                    Y = startY,
+                    Vx = vx,
+                    Vy = vy,
+                    SpinSpeed = spin ? (rng.Next(0, 2) == 0 ? -240 : 240) : 0,
+                    WavePhase = rng.NextDouble() * Math.PI * 2,
+                    WaveAmplitude = isSlowFloat ? 12.0 : 5.0,
+                    Age = 0,
+                    Lifetime = isSlowFloat ? 2.1 : 1.15
+                });
+            }
+        }
+
+        private void UpdateEmoteParticles(double dt)
+        {
+            if (_activeParticles.Count == 0) return;
+
+            for (int i = _activeParticles.Count - 1; i >= 0; i--)
+            {
+                var p = _activeParticles[i];
+                p.Age += dt;
+
+                if (p.Age >= p.Lifetime)
+                {
+                    EmoteCanvas.Children.Remove(p.Element);
+                    _activeParticles.RemoveAt(i);
+                    continue;
+                }
+
+                double progress = p.Age / p.Lifetime;
+                p.X += p.Vx * dt;
+                p.Y += p.Vy * dt;
+
+                double waveOffset = Math.Sin(p.WavePhase + p.Age * 4.5) * p.WaveAmplitude;
+                p.Translate.X = p.X + waveOffset;
+                p.Translate.Y = p.Y;
+
+                if (Math.Abs(p.SpinSpeed) > 0.1)
+                {
+                    p.Rotate.Angle += p.SpinSpeed * dt;
+                }
+
+                double scaleVal = progress < 0.2
+                    ? 0.6 + (progress / 0.2) * 0.5
+                    : 1.1 - ((progress - 0.2) / 0.8) * 0.25;
+                p.Scale.ScaleX = scaleVal;
+                p.Scale.ScaleY = scaleVal;
+
+                p.Element.Opacity = progress < 0.65
+                    ? 1.0
+                    : Math.Max(0.0, 1.0 - (progress - 0.65) / 0.35);
+            }
         }
 
         // Anropas när en ny state faktiskt börjar spelas
@@ -1929,7 +2149,7 @@ namespace SlimeHelper
                                     var (ok, msg) = _brainManager.BindRepo(tag, path);
                                     if (ok)
                                     {
-                                        ShowTempMessage($"Bound {msg} to this folder! 🧠", "CUTE", 4);
+                                        ShowTempMessage($"Bound {msg} to this folder!", "CUTE", 4);
                                         PlaySounds("Idle.wav");
                                         WriteCliResponse(requestId, $"Bound {msg} → {path}");
                                     }

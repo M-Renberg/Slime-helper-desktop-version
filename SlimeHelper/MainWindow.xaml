@@ -211,5 +211,13 @@
                 </TransformGroup>
             </Image.RenderTransform>
         </Image>
+        <Canvas x:Name="EmoteCanvas"
+                Grid.Row="1"
+                Width="220"
+                Height="180"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Top"
+                IsHitTestVisible="False"
+                ClipToBounds="False"/>
     </Grid>
 </Window>

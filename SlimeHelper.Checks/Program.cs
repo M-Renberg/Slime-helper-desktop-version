@@ -896,6 +896,99 @@ namespace SlimeHelper.Checks
                 }
             }
             Check(sawTiredLateNight, "PickIdleChatter surfaces late-night TIRED reaction");
+
+            // 4. Phase 1: Poke-Combo escalation and emote particles
+            var poke1 = SlimeResponses.GetPokeComboReaction(1, "Default", testRng);
+            Check(poke1.Status == "POKE" && poke1.Emote == "💧", "Poke streak 1 returns POKE and water droplet emote", $"{poke1}");
+
+            var pokePink = SlimeResponses.GetPokeComboReaction(2, "Pink", testRng);
+            Check(pokePink.Status == "POKE" && pokePink.Emote == "💖", "Poke streak 2 on Pink skin returns POKE and heart emote", $"{pokePink}");
+
+            var poke3 = SlimeResponses.GetPokeComboReaction(3, "Girl", testRng);
+            Check(poke3.Status == "ANNOYED" && poke3.Emote == "💢" && poke3.Impact > poke1.Impact, "Poke streak 3 escalates to ANNOYED with anger emote", $"{poke3}");
+
+            var poke5 = SlimeResponses.GetPokeComboReaction(5, "Default", testRng);
+            Check(poke5.Status == "SCARED" && poke5.Emote == "💫" && poke5.Impact > poke3.Impact, "Poke streak 5 escalates to SCARED with spinning dizzy emote", $"{poke5}");
+
+            // 5. Phase 2: Contextual awareness (Active Window & High CPU load) + No emojis in spoken text
+            Check(SlimeResponses.ClassifyActiveWindow("Code", "MainWindow.xaml.cs - Visual Studio Code") == "CODING", "VS Code classified as CODING");
+            Check(SlimeResponses.ClassifyActiveWindow("devenv", "slime-girl - Microsoft Visual Studio") == "CODING", "Visual Studio classified as CODING");
+            Check(SlimeResponses.ClassifyActiveWindow("Spotify", "Spotify Premium") == "MUSIC", "Spotify classified as MUSIC");
+            Check(SlimeResponses.ClassifyActiveWindow("chrome", "YouTube Music - Google Chrome") == "MUSIC", "YouTube Music classified as MUSIC (not distraction)");
+            Check(SlimeResponses.ClassifyActiveWindow("chrome", "Funny Cat Video - YouTube - Google Chrome") == "DISTRACTION", "YouTube video classified as DISTRACTION");
+            Check(SlimeResponses.ClassifyActiveWindow("chrome", "r/programming - Reddit") == "DISTRACTION", "Reddit classified as DISTRACTION");
+            Check(SlimeResponses.ClassifyActiveWindow("SlimeHelper", "SlimeHelper") == null, "SlimeHelper itself ignored by window classifier");
+
+            // Expanded Phase 2 contexts (Gmail, Teams, Google Meet, Postman, Thunder Client, Vercel, GitHub, GitHub Actions, Bash, Terminal, Discord, Slack, DBeaver, MySQL, Browsers)
+            Check(SlimeResponses.ClassifyActiveWindow("chrome", "Inbox (3) - Gmail - Google Chrome") == "EMAIL", "Gmail classified as EMAIL");
+            Check(SlimeResponses.ClassifyActiveWindow("ms-teams", "Sprint Planning | Microsoft Teams") == "MEETING", "Teams classified as MEETING");
+            Check(SlimeResponses.ClassifyActiveWindow("chrome", "Google Meet - abc-defg-hij") == "MEETING", "Google Meet classified as MEETING");
+            Check(SlimeResponses.ClassifyActiveWindow("Postman", "POST /api/login - Postman") == "API_TESTING", "Postman classified as API_TESTING");
+            Check(SlimeResponses.ClassifyActiveWindow("Code", "Thunder Client - Visual Studio Code") == "API_TESTING", "Thunder Client inside VS Code classified as API_TESTING");
+            Check(SlimeResponses.ClassifyActiveWindow("dbeaver", "DBeaver 24.1 - localhost") == "DATABASE", "DBeaver classified as DATABASE");
+            Check(SlimeResponses.ClassifyActiveWindow("mysqlworkbench", "MySQL Workbench") == "DATABASE", "MySQL Workbench classified as DATABASE");
+            Check(SlimeResponses.ClassifyActiveWindow("brave", "Actions · myorg/myrepo · GitHub - Brave") == "GITHUB_ACTIONS", "GitHub Actions classified as GITHUB_ACTIONS");
+            Check(SlimeResponses.ClassifyActiveWindow("firefox", "Pull requests · myorg/myrepo · GitHub - Mozilla Firefox") == "GITHUB", "GitHub PR page classified as GITHUB");
+            Check(SlimeResponses.ClassifyActiveWindow("msedge", "Dashboard – Vercel - Microsoft Edge") == "DEPLOY_CLOUD", "Vercel classified as DEPLOY_CLOUD");
+            Check(SlimeResponses.ClassifyActiveWindow("bash", "MINGW64:/c/Users/Mikae/repos") == "TERMINAL", "Bash classified as TERMINAL");
+            Check(SlimeResponses.ClassifyActiveWindow("WindowsTerminal", "Windows PowerShell") == "TERMINAL", "Windows Terminal classified as TERMINAL");
+            Check(SlimeResponses.ClassifyActiveWindow("Discord", "#general | Discord") == "CHAT_COMMS", "Discord classified as CHAT_COMMS");
+            Check(SlimeResponses.ClassifyActiveWindow("slack", "Slack | dev-team") == "CHAT_COMMS", "Slack classified as CHAT_COMMS");
+            Check(SlimeResponses.ClassifyActiveWindow("chrome", "MDN Web Docs - Google Chrome") == "BROWSER", "Generic Chrome docs tab classified as BROWSER");
+            Check(SlimeResponses.ClassifyActiveWindow("firefox", "Stack Overflow - Mozilla Firefox") == "BROWSER", "Generic Firefox tab classified as BROWSER");
+            Check(SlimeResponses.ClassifyActiveWindow("brave", "Localhost:3000 - Brave") == "BROWSER", "Generic Brave tab classified as BROWSER");
+            Check(SlimeResponses.ClassifyActiveWindow("msedge", "Learn .NET - Microsoft Edge") == "BROWSER", "Generic Edge tab classified as BROWSER");
+
+            var codingReaction = SlimeResponses.GetContextReaction("CODING", testRng);
+            var musicReaction = SlimeResponses.GetContextReaction("MUSIC", testRng);
+            var distractionReaction = SlimeResponses.GetContextReaction("DISTRACTION", testRng);
+            var cpuReaction = SlimeResponses.GetContextReaction("HIGH_CPU", testRng);
+            var meetingReaction = SlimeResponses.GetContextReaction("MEETING", testRng);
+            var emailReaction = SlimeResponses.GetContextReaction("EMAIL", testRng);
+            var chatReaction = SlimeResponses.GetContextReaction("CHAT_COMMS", testRng);
+            var apiReaction = SlimeResponses.GetContextReaction("API_TESTING", testRng);
+            var dbReaction = SlimeResponses.GetContextReaction("DATABASE", testRng);
+            var ghActionsReaction = SlimeResponses.GetContextReaction("GITHUB_ACTIONS", testRng);
+            var ghReaction = SlimeResponses.GetContextReaction("GITHUB", testRng);
+            var deployReaction = SlimeResponses.GetContextReaction("DEPLOY_CLOUD", testRng);
+            var termReaction = SlimeResponses.GetContextReaction("TERMINAL", testRng);
+            var browserReaction = SlimeResponses.GetContextReaction("BROWSER", testRng);
+
+            Check(codingReaction.HasValue && codingReaction.Value.Status == "NOTES", "CODING context returns NOTES reaction", $"{codingReaction}");
+            Check(musicReaction.HasValue && musicReaction.Value.Status == "CUTE", "MUSIC context returns CUTE reaction", $"{musicReaction}");
+            Check(distractionReaction.HasValue && distractionReaction.Value.Status == "FUNNY", "DISTRACTION context returns FUNNY reaction", $"{distractionReaction}");
+            Check(cpuReaction.HasValue && cpuReaction.Value.Status == "TIRED", "HIGH_CPU context returns TIRED reaction", $"{cpuReaction}");
+            Check(meetingReaction.HasValue && meetingReaction.Value.Status == "CUTE", "MEETING context returns CUTE reaction", $"{meetingReaction}");
+            Check(emailReaction.HasValue && emailReaction.Value.Status == "NOTES", "EMAIL context returns NOTES reaction", $"{emailReaction}");
+            Check(chatReaction.HasValue && chatReaction.Value.Status == "FUNNY", "CHAT_COMMS context returns FUNNY reaction", $"{chatReaction}");
+            Check(apiReaction.HasValue && apiReaction.Value.Status == "THINKING", "API_TESTING context returns THINKING reaction", $"{apiReaction}");
+            Check(dbReaction.HasValue && dbReaction.Value.Status == "WARNING", "DATABASE context returns WARNING reaction", $"{dbReaction}");
+            Check(ghActionsReaction.HasValue && ghActionsReaction.Value.Status == "STREAK", "GITHUB_ACTIONS context returns STREAK reaction", $"{ghActionsReaction}");
+            Check(ghReaction.HasValue && ghReaction.Value.Status == "NOTES", "GITHUB context returns NOTES reaction", $"{ghReaction}");
+            Check(deployReaction.HasValue && deployReaction.Value.Status == "HURRAY", "DEPLOY_CLOUD context returns HURRAY reaction", $"{deployReaction}");
+            Check(termReaction.HasValue && termReaction.Value.Status == "STREAK", "TERMINAL context returns STREAK reaction", $"{termReaction}");
+            Check(browserReaction.HasValue && browserReaction.Value.Status == "THINKING", "BROWSER context returns THINKING reaction", $"{browserReaction}");
+
+            static bool HasNoSurrogateEmojis(IEnumerable<string> phrases) =>
+                phrases.All(p => !p.Any(char.IsSurrogate));
+
+            Check(HasNoSurrogateEmojis(SlimeResponses.PokeDizzyResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.WindowShakeResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.CodingWindowResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.MusicWindowResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.DistractionWindowResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.HighCpuResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.MeetingWindowResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.EmailWindowResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.ChatCommsWindowResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.ApiTestingWindowResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.DatabaseWindowResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.GitHubActionsWindowResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.GitHubWindowResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.DeployCloudWindowResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.TerminalWindowResponses) &&
+                  HasNoSurrogateEmojis(SlimeResponses.BrowserWindowResponses),
+                  "Spoken response arrays contain no emojis");
         }
     }
 }
