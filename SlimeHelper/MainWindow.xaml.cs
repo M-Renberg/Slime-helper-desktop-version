@@ -2124,8 +2124,8 @@ namespace SlimeHelper
             _skewOffset = Math.Clamp(_skewOffset, -16.0, 16.0);
 
             double organicIdleSway = (_isAsleep || _isAfkSleeping)
-                ? Math.Sin(t * 0.55) * 0.6
-                : Math.Sin(t * 0.95) * 1.35;
+                ? Math.Sin(t * 0.45) * 0.25
+                : Math.Sin(t * 0.75) * 0.45;
 
             // Gravity drop & bounce physics after drag release
             if (_jumpOffsetY < 0 || Math.Abs(_jumpVelocityY) > 0.5)
