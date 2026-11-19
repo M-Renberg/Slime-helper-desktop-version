@@ -1134,6 +1134,77 @@ namespace SlimeHelper.Checks
 
             moodMem.ApplyEvent("REST");
             Check(moodMem.Energy >= 25, "REST event restores Energy", moodMem.GetStatusSummary());
+
+            PaperDollTests(work);
+        }
+
+        // ------------------------------------------------------------------ Paper-Doll layer resolver & Girl assets
+        static void PaperDollTests(string work)
+        {
+            Console.WriteLine("\n== Paper-Doll resolver & Girl skin layers");
+
+            // 1. Natural numeric ordering (1..10) so frame 10 doesn't sort before frame 2
+            var unordered = new[] { "frame-10.png", "frame-2.png", "frame-1.png", "frame-3.png" };
+            var ordered = PaperDollResolver.OrderPathsNaturally(unordered);
+            Check(ordered.SequenceEqual(new[] { "frame-1.png", "frame-2.png", "frame-3.png", "frame-10.png" }),
+                  "OrderPathsNaturally sorts numeric suffixes 1, 2, 3, 10", string.Join(", ", ordered));
+
+            // 2. Synthetic edge-case directory: moth-closed, Background Merged, warning-1..2 vs drops-1, slimemotion
+            string synthState = Path.Combine(work, "PaperDollSynth");
+            string synthLayers = Path.Combine(synthState, "Layers");
+            Directory.CreateDirectory(synthLayers);
+            foreach (var f in new[] { "Background Merged.png", "eyes-open.png", "moth-closed.png", "warning-1.png", "warning-2.png", "drops-1.png", "slimemotion-1-2.png", "slimemotion-1-1.png", "slimemotion-2-1.png" })
+                File.WriteAllBytes(Path.Combine(synthLayers, f), Array.Empty<byte>());
+
+            var synth = PaperDollResolver.ResolveLayers(synthState);
+            Check(synth != null && Path.GetFileName(synth.Base) == "Background Merged.png", "Resolves Background Merged.png as Base");
+            Check(synth != null && Path.GetFileName(synth.Eyes) == "eyes-open.png", "Resolves eyes-open.png as Eyes");
+            Check(synth != null && Path.GetFileName(synth.MouthClosed) == "moth-closed.png", "Resolves moth-closed.png alias as MouthClosed");
+            Check(synth != null && synth.Overlay != null && Path.GetFileName(synth.Overlay) == "drops-1.png", "Resolves single-frame numbered effect drops-1.png as static Overlay");
+            Check(synth != null && synth.OverlayFrames.Select(Path.GetFileName).SequenceEqual(new[] { "warning-1.png", "warning-2.png" }),
+                  "Resolves multi-frame warning-1..2 as ordered OverlayFrames");
+            Check(synth != null && synth.MotionGroups.Count == 2
+                  && synth.MotionGroups[0].Select(Path.GetFileName).SequenceEqual(new[] { "slimemotion-1-1.png", "slimemotion-1-2.png" })
+                  && synth.MotionGroups[1].Select(Path.GetFileName).SequenceEqual(new[] { "slimemotion-2-1.png" }),
+                  "Resolves slimemotion groups & frame order numerically");
+
+            // 3. Verify all 18 Girl emote Layers folders if repo root is discoverable
+            string? repoRoot = FindRepoRoot();
+            if (repoRoot != null)
+            {
+                string girlDir = Path.Combine(repoRoot, "SlimeHelper", "Images", "Girl");
+                var layerEmotes = Directory.GetDirectories(girlDir)
+                    .Where(d => Directory.Exists(Path.Combine(d, "Layers")))
+                    .OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                Check(layerEmotes.Count == 18, $"Found all 18 Girl Paper-Doll emote Layers folders (found {layerEmotes.Count})");
+
+                foreach (var emoteDir in layerEmotes)
+                {
+                    string name = Path.GetFileName(emoteDir);
+                    var resolved = PaperDollResolver.ResolveLayers(emoteDir);
+                    Check(resolved != null && !string.IsNullOrEmpty(resolved.Base), $"Girl/{name}/Layers resolves Base");
+                }
+
+                var sleep = PaperDollResolver.ResolveLayers(Path.Combine(girlDir, "SLEEP"));
+                Check(sleep != null && sleep.MotionGroups.Count == 3 && sleep.MotionGroups.All(g => g.Count == 2),
+                      "Girl/SLEEP has 3 slimemotion groups with 2 frames each");
+
+                var scared = PaperDollResolver.ResolveLayers(Path.Combine(girlDir, "SCARED"));
+                Check(scared != null && scared.Eyes != null && scared.MouthClosed != null && scared.MouthOpen != null,
+                      "Girl/SCARED resolves eyes-open, mouth-closed, and mouth-open");
+            }
+        }
+
+        static string? FindRepoRoot()
+        {
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+            while (dir != null)
+            {
+                if (File.Exists(Path.Combine(dir.FullName, "slime-girl.sln"))) return dir.FullName;
+                dir = dir.Parent;
+            }
+            return null;
         }
     }
 }

@@ -140,6 +140,7 @@
             
             <Separator/>
             
+                <MenuItem x:Name="RoamingMenuItem" Header="Allow Desktop Roaming" IsCheckable="True" IsChecked="True" Click="RoamingMenuItem_Click"/>
                 <MenuItem x:Name="SleepMenuItem" Header="Put to Sleep" Click="SleepMenuItem_Click"/>
             <Separator/>
 
@@ -195,6 +196,41 @@
                 Foreground="#222"/>
             </ScrollViewer>
         </Border>
+        <!-- Dynamic Ground Shadow -->
+        <Ellipse x:Name="SlimeShadow"
+                 Grid.Row="1"
+                 Width="115"
+                 Height="22"
+                 HorizontalAlignment="Center"
+                 VerticalAlignment="Bottom"
+                 Margin="0,0,0,-6"
+                 IsHitTestVisible="False"
+                 RenderTransformOrigin="0.5, 0.5">
+            <Ellipse.Fill>
+                <RadialGradientBrush>
+                    <GradientStop Color="#66000000" Offset="0.0"/>
+                    <GradientStop Color="#28000000" Offset="0.6"/>
+                    <GradientStop Color="#00000000" Offset="1.0"/>
+                </RadialGradientBrush>
+            </Ellipse.Fill>
+            <Ellipse.RenderTransform>
+                <TransformGroup>
+                    <ScaleTransform x:Name="ShadowScale" ScaleX="1" ScaleY="1"/>
+                    <TranslateTransform x:Name="ShadowTranslate" X="0" Y="0"/>
+                </TransformGroup>
+            </Ellipse.RenderTransform>
+        </Ellipse>
+
+        <!-- Double-buffered back image for flicker-free crossfades -->
+        <Image x:Name="SlimeImageBack"
+               Grid.Row="1"
+               Width="150"
+               Stretch="Uniform"
+               RenderTransformOrigin="0.5, 1.0"
+               Opacity="0"
+               IsHitTestVisible="False"
+               RenderTransform="{Binding ElementName=SlimeImage, Path=RenderTransform}"/>
+
         <Image x:Name="SlimeImage"
            Grid.Row="1"
            Source="Images/slime_idle.png"
@@ -206,11 +242,56 @@
             <Image.RenderTransform>
                 <TransformGroup>
                     <ScaleTransform x:Name="SlimeScale" ScaleX="1" ScaleY="1"/>
+                    <SkewTransform x:Name="SlimeSkew" AngleX="0" AngleY="0"/>
                     <RotateTransform x:Name="SlimeRotate" Angle="0"/>
                     <TranslateTransform x:Name="SlimeTranslate" X="0" Y="0"/>
                 </TransformGroup>
             </Image.RenderTransform>
         </Image>
+
+        <!-- Paper-Doll v1.0 Layered Character Host (active when <State>/Layers exists) -->
+        <Grid x:Name="PaperDollHost"
+              Grid.Row="1"
+              Width="150"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Bottom"
+              Visibility="Collapsed"
+              Opacity="0.6"
+              RenderTransformOrigin="0.5, 1.0"
+              IsHitTestVisible="True"
+              RenderTransform="{Binding ElementName=SlimeImage, Path=RenderTransform}">
+            <Image x:Name="PdBaseImage" Stretch="Uniform" IsHitTestVisible="True"/>
+            <Image x:Name="PdEyeWhiteImage" Stretch="Uniform" IsHitTestVisible="False"/>
+            <Image x:Name="PdEyesImage" Stretch="Uniform" IsHitTestVisible="False">
+                <Image.RenderTransform>
+                    <TranslateTransform x:Name="PdEyesTranslate" X="0" Y="0"/>
+                </Image.RenderTransform>
+            </Image>
+            <Image x:Name="PdNoseImage" Stretch="Uniform" IsHitTestVisible="False"/>
+            <Image x:Name="PdMouthImage" Stretch="Uniform" IsHitTestVisible="False"/>
+            <Image x:Name="PdBlinkImage" Stretch="Uniform" Visibility="Collapsed" IsHitTestVisible="False"/>
+            <Image x:Name="PdEyebrowsImage" Stretch="Uniform" IsHitTestVisible="False"/>
+            <Image x:Name="PdHairLeftImage" Stretch="Uniform" RenderTransformOrigin="0.5, 0.15" IsHitTestVisible="False">
+                <Image.RenderTransform>
+                    <RotateTransform x:Name="PdHairLeftRotate" Angle="0"/>
+                </Image.RenderTransform>
+            </Image>
+            <Image x:Name="PdHairMidImage" Stretch="Uniform" RenderTransformOrigin="0.5, 0.15" IsHitTestVisible="False">
+                <Image.RenderTransform>
+                    <RotateTransform x:Name="PdHairMidRotate" Angle="0"/>
+                </Image.RenderTransform>
+            </Image>
+            <Image x:Name="PdHairRightImage" Stretch="Uniform" RenderTransformOrigin="0.5, 0.15" IsHitTestVisible="False">
+                <Image.RenderTransform>
+                    <RotateTransform x:Name="PdHairRightRotate" Angle="0"/>
+                </Image.RenderTransform>
+            </Image>
+            <Image x:Name="PdOverlayImage" Stretch="Uniform" IsHitTestVisible="False"/>
+            <Image x:Name="PdEffectImage" Stretch="Uniform" IsHitTestVisible="False"/>
+            <Image x:Name="PdMotion1Image" Stretch="Uniform" IsHitTestVisible="False"/>
+            <Image x:Name="PdMotion2Image" Stretch="Uniform" IsHitTestVisible="False"/>
+            <Image x:Name="PdMotion3Image" Stretch="Uniform" IsHitTestVisible="False"/>
+        </Grid>
         <Canvas x:Name="EmoteCanvas"
                 Grid.Row="1"
                 Width="220"

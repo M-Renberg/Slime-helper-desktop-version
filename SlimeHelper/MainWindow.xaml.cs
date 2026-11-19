@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -68,6 +69,17 @@ namespace SlimeHelper
         private double _flavorAngle = 0;
         private double _flavorX = 0;
 
+        // Motion 2.0: Skew inertia, talking bounce, jump/drop physics & autonomous roaming
+        private double _skewOffset = 0;
+        private double _skewVelocity = 0;
+        private double _jumpOffsetY = 0;
+        private double _jumpVelocityY = 0;
+        private double _lastDragY = 0;
+        private DateTime _talkingUntil = DateTime.MinValue;
+        private bool _allowDesktopRoaming = true;
+        private bool _isRoamingHopActive = false;
+        private DateTime _nextRoamingHopAt = DateTime.Now.AddSeconds(40);
+
         // Phase 1: Poke-Combo, Window Shake & Emote Particle state
         private int _pokeStreak = 0;
         private DateTime _lastPokeAt = DateTime.MinValue;
@@ -116,6 +128,27 @@ namespace SlimeHelper
 
         // Phase 5: Mood & Energy state
         private double _currentBreathingMultiplier = 1.0;
+        private int _currentMoodValue = 80;
+
+        // Paper-Doll v1.0 runtime state
+        private PaperDollProfile? _activePaperDoll = null;
+        private double _eyeOffsetX = 0;
+        private double _eyeOffsetY = 0;
+        private bool _isPaperDollBlinking = false;
+        private int _lastMouthMode = -1; // 0 = closed, 1 = open, 2 = smile
+        private int _lastOverlayFrameIdx = -1;
+        private readonly int[] _lastMotionFrameIdx = [-1, -1, -1];
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativePoint
+        {
+            public int X;
+            public int Y;
+        }
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetCursorPos(out NativePoint lpPoint);
 
         private static readonly HashSet<string> IgnoredHashDirectives = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -289,11 +322,18 @@ namespace SlimeHelper
             _activityWatcher.ActiveRepoPath = initialGhPath;
             _gitHubWatcher.Start(initialGhPath, settings.GitHubToken);
 
-            // Drag function & Window Shake detection
+            // Drag function, Drag Inertia & Window Shake detection
             LocationChanged += (s, e) =>
             {
                 if (!_isDraggingWindow) return;
                 double dx = Left - _lastDragX;
+                double dy = Top - _lastDragY;
+                _lastDragY = Top;
+
+                // Apply pendulum skew & stretch inertia based on drag velocity
+                _skewVelocity += Math.Clamp(-dx * 3.8, -95.0, 95.0);
+                _impactVelocity += Math.Clamp(dy * 0.45, -12.0, 12.0);
+
                 if (Math.Abs(dx) < 8) return;
 
                 int dir = dx > 0 ? 1 : -1;
@@ -319,6 +359,7 @@ namespace SlimeHelper
                 startWindowPos = new Point(Left, Top);
                 _isDraggingWindow = true;
                 _lastDragX = Left;
+                _lastDragY = Top;
                 _lastDragDir = 0;
                 _shakeReversals = 0;
                 _firstShakeReversalAt = DateTime.Now;
@@ -346,6 +387,12 @@ namespace SlimeHelper
                 else if (distanceMoved < 5)
                 {
                     PokeSlime();
+                }
+                else
+                {
+                    // Gravity drop & landing squash when releasing Slime after dragging
+                    _jumpOffsetY = -16.0;
+                    _jumpVelocityY = 35.0;
                 }
             };
 
@@ -406,12 +453,21 @@ namespace SlimeHelper
                 StartInteractionTimer(3);
         }
 
+        private void TriggerTalkingForText(string? text, string? emotion)
+        {
+            if (!string.IsNullOrWhiteSpace(text) && !string.Equals(emotion, "SLEEP", StringComparison.OrdinalIgnoreCase))
+            {
+                _talkingUntil = DateTime.Now.AddMilliseconds(Math.Clamp(text.Length * 32, 650, 2100));
+            }
+        }
+
         private void ShowTempMessage(string text, string emotion, int seconds = 3)
         {
             isInteracting = true;
             SpeechText.Text = text;
             SpeechText.Foreground = Brushes.Black;
             SpeechBubble.Visibility = Visibility.Visible;
+            TriggerTalkingForText(text, emotion);
             ShowSlimeReaction(emotion, "");
 
             StartInteractionTimer(seconds);
@@ -487,6 +543,10 @@ namespace SlimeHelper
 
         private void LoadAnimations()
         {
+            _animationCts?.Cancel();
+            _animationCts?.Dispose();
+            _animationCts = null;
+            _currentPlayingState = "";
             _animationProfiles.Clear();
             string basePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Images", currentSkin);
 
@@ -496,10 +556,14 @@ namespace SlimeHelper
             {
                 string stateName = new DirectoryInfo(stateDir).Name.ToUpperInvariant();
 
-                var files = Directory.GetFiles(stateDir, "*.png").OrderBy(f => f).ToList();
+                var files = PaperDollResolver.OrderPathsNaturally(Directory.GetFiles(stateDir, "*.png"));
                 if (files.Count == 0) continue;
 
-                var profile = new AnimationProfile { Frames = files };
+                var profile = new AnimationProfile
+                {
+                    Frames = files,
+                    PaperDoll = LoadPaperDollLayers(stateDir)
+                };
 
                 if (stateName == "IDLE")
                 {
@@ -552,10 +616,32 @@ namespace SlimeHelper
             TriggerImpact(stateKey is "POKE" or "PUSH" or "HURRAY" or "WARNING" ? 1.6 : 1.0);
 
             _animationCts?.Cancel();
+            _animationCts?.Dispose();
             _animationCts = new CancellationTokenSource();
             var token = _animationCts.Token;
 
             var profile = _animationProfiles[stateKey];
+            if (profile.PaperDoll != null)
+            {
+                Dispatcher.Invoke(() => ActivatePaperDoll(profile.PaperDoll));
+                try
+                {
+                    while (!token.IsCancellationRequested)
+                    {
+                        await Task.Delay(rng.Next(2800, 5600), token);
+                        if (profile.PaperDoll.EyesBlink != null && stateKey != "SLEEP" && !_isAsleep && !_isAfkSleeping && (!isInteracting || stateKey == "THINKING"))
+                        {
+                            Dispatcher.Invoke(() => SetPaperDollBlink(true));
+                            await Task.Delay(140, token);
+                            Dispatcher.Invoke(() => SetPaperDollBlink(false));
+                        }
+                    }
+                }
+                catch (TaskCanceledException) { }
+                return;
+            }
+
+            Dispatcher.Invoke(() => DeactivatePaperDoll());
             if (profile.Frames.Count == 0) return;
 
             // Bara fade på allra första bilden vid en ny status
@@ -616,32 +702,38 @@ namespace SlimeHelper
             bitmap.EndInit();
             bitmap.Freeze();
 
-            if (useFade)
+            if (useFade && SlimeImage.Source != null && SlimeImageBack != null)
             {
-                // Mjukare fade till 0.2
-                var fadeOut = new DoubleAnimation
+                // Seamless double-buffered crossfade: keep previous frame on SlimeImageBack so total opacity never dips
+                SlimeImageBack.Source = SlimeImage.Source;
+                SlimeImageBack.BeginAnimation(OpacityProperty, null);
+                SlimeImageBack.Opacity = 0.6;
+
+                SlimeImage.Source = bitmap;
+                var fadeIn = new DoubleAnimation
                 {
-                    To = 0.2,
-                    Duration = TimeSpan.FromMilliseconds(100)
+                    From = 0.0,
+                    To = 0.6,
+                    Duration = TimeSpan.FromMilliseconds(150)
+                };
+                var fadeOutBack = new DoubleAnimation
+                {
+                    From = 0.6,
+                    To = 0.0,
+                    Duration = TimeSpan.FromMilliseconds(150)
                 };
 
-                fadeOut.Completed += (s, e) =>
-                {
-                    SlimeImage.Source = bitmap;
-                    var fadeIn = new DoubleAnimation
-                    {
-                        From = 0.2,
-                        To = 0.6,
-                        Duration = TimeSpan.FromMilliseconds(100)
-                    };
-                    SlimeImage.BeginAnimation(OpacityProperty, fadeIn);
-                };
-
-                SlimeImage.BeginAnimation(OpacityProperty, fadeOut);
+                SlimeImage.BeginAnimation(OpacityProperty, fadeIn);
+                SlimeImageBack.BeginAnimation(OpacityProperty, fadeOutBack);
             }
             else
             {
-                // Direktbyte utan animering för andningsrutorna
+                // Direct frame swap for breathing/blink loops
+                if (SlimeImageBack != null)
+                {
+                    SlimeImageBack.BeginAnimation(OpacityProperty, null);
+                    SlimeImageBack.Opacity = 0.0;
+                }
                 SlimeImage.BeginAnimation(OpacityProperty, null);
                 SlimeImage.Opacity = 0.6;
                 SlimeImage.Source = bitmap;
@@ -726,6 +818,7 @@ namespace SlimeHelper
                 memory.ApplyEvent(eventType);
                 _brainManager.SaveMemory(memory);
                 _currentBreathingMultiplier = memory.GetBreathingSpeedMultiplier();
+                _currentMoodValue = memory.Mood;
                 MoodChanged?.Invoke(memory);
             }
             catch { }
@@ -735,6 +828,7 @@ namespace SlimeHelper
         {
             var memory = _brainManager.LoadMemory();
             _currentBreathingMultiplier = memory.GetBreathingSpeedMultiplier();
+            _currentMoodValue = memory.Mood;
             return memory;
         }
 
@@ -1055,6 +1149,8 @@ namespace SlimeHelper
                     string provider = settings?.SelectedProvider ?? "Gemini";
                     GeminiCheck.IsChecked = (provider == "Gemini");
                     ClaudeCheck.IsChecked = (provider == "Claude");
+                    _allowDesktopRoaming = settings?.AllowDesktopRoaming ?? true;
+                    if (RoamingMenuItem != null) RoamingMenuItem.IsChecked = _allowDesktopRoaming;
                 }
             }
             catch { currentSkin = "Default"; }
@@ -1319,6 +1415,7 @@ namespace SlimeHelper
                         {
                             SpeechText.Text = $"I have no repo bound to {firstHashTag.ToLowerInvariant()}. Go to the repo's folder and run: slime bind {firstHashTag.TrimStart('#')}";
                             WriteCliResponse(cliRequestId, SpeechText.Text, true);
+                            TriggerTalkingForText(SpeechText.Text, "UNSURE");
                             ShowSlimeReaction("UNSURE", "");
                             StartInteractionTimer(8);
                             return;
@@ -1597,6 +1694,10 @@ namespace SlimeHelper
 
                 // 4. Visa det slutgiltiga resultatet i appen
                 SpeechText.Text = cleanResponse;
+                if (!string.IsNullOrWhiteSpace(cleanResponse))
+                {
+                    _talkingUntil = DateTime.Now.AddMilliseconds(Math.Clamp(cleanResponse.Length * 25, 800, 2200));
+                }
                 AiResponseReceived?.Invoke(activeThread, cleanResponse);
                 WriteCliResponse(cliRequestId, cliText);
                 ShowSlimeReaction("IDLE", "");
@@ -1607,6 +1708,7 @@ namespace SlimeHelper
                 SpeechText.Text = $"Brain freeze! {ex.Message}";
                 AiErrorOccurred?.Invoke(ex.Message);
                 WriteCliResponse(cliRequestId, SpeechText.Text, true);
+                TriggerTalkingForText(SpeechText.Text, "ERROR");
                 ShowSlimeReaction("ERROR", "");
                 SpeechText.Foreground = Brushes.Red;
             }
@@ -1697,6 +1799,7 @@ namespace SlimeHelper
                 {
                     SpeechText.Text = message;
                     SpeechBubble.Visibility = Visibility.Visible;
+                    TriggerTalkingForText(message, status);
                 }
 
                 string upper = (status ?? "").ToUpperInvariant();
@@ -1897,7 +2000,7 @@ namespace SlimeHelper
                                 "3. Code for basic visualizations using Seaborn/Matplotlib.\n" +
                                 "Return ONLY valid JSON.";
 
-                ShowTempMessage("Slime is analyzing dataset...", "WORKING", 4);
+                ShowTempMessage("Slime is analyzing dataset...", "THINKING", 4);
                 PlaySounds("Idle.wav");
 
                 // 3. Anropa AI-tjänsten (byt ut _aiService mot ditt faktiska fältnamn om det skiljer sig)
@@ -1941,6 +2044,19 @@ namespace SlimeHelper
             }
         }
 
+
+        private void RoamingMenuItem_Click(object sender, RoutedEventArgs e)
+        {
+            _allowDesktopRoaming = RoamingMenuItem.IsChecked;
+            var settings = LoadFullSettings();
+            settings.AllowDesktopRoaming = _allowDesktopRoaming;
+            SaveFullSettings(settings);
+
+            string msg = _allowDesktopRoaming
+                ? "Desktop roaming enabled! I might hop around when I'm bored."
+                : "Desktop roaming disabled. I'll stay right where you put me!";
+            ShowTempMessage(msg, "CUTE", 3);
+        }
 
         private void SleepMenuItem_Click(object sender, RoutedEventArgs e)
         {
@@ -2000,6 +2116,47 @@ namespace SlimeHelper
             _impactVelocity += force * dt;
             _impactOffset += _impactVelocity * dt;
 
+            // Secondary sway & drag pendulum physics (SkewTransform keeps feet anchored on ground)
+            const double skewStiffness = 140.0, skewDamping = 12.5;
+            double skewForce = -skewStiffness * _skewOffset - skewDamping * _skewVelocity;
+            _skewVelocity += skewForce * dt;
+            _skewOffset += _skewVelocity * dt;
+            _skewOffset = Math.Clamp(_skewOffset, -16.0, 16.0);
+
+            double organicIdleSway = (_isAsleep || _isAfkSleeping)
+                ? Math.Sin(t * 0.55) * 0.6
+                : Math.Sin(t * 0.95) * 1.35;
+
+            // Gravity drop & bounce physics after drag release
+            if (_jumpOffsetY < 0 || Math.Abs(_jumpVelocityY) > 0.5)
+            {
+                const double gravity = 520.0;
+                _jumpVelocityY += gravity * dt;
+                _jumpOffsetY += _jumpVelocityY * dt;
+
+                if (_jumpOffsetY >= 0)
+                {
+                    _jumpOffsetY = 0;
+                    if (_jumpVelocityY > 45.0)
+                    {
+                        // Landing impact squash + small bounce
+                        TriggerImpact(Math.Min(2.2, _jumpVelocityY / 95.0));
+                        _jumpVelocityY = -_jumpVelocityY * 0.28;
+                    }
+                    else
+                    {
+                        _jumpVelocityY = 0;
+                    }
+                }
+            }
+
+            // Talking bounce when Slime is speaking (no typewriter text)
+            double talkBob = 0;
+            if (DateTime.Now < _talkingUntil && !_isAsleep && !_isAfkSleeping)
+            {
+                talkBob = Math.Abs(Math.Sin(t * 15.0));
+            }
+
             // Occasional idle flavor tilt (only in IDLE, no new art required)
             if (DateTime.Now >= _nextIdleFlavorAt && !isInteracting && _currentPlayingState == "IDLE")
             {
@@ -2007,11 +2164,36 @@ namespace SlimeHelper
                 _nextIdleFlavorAt = DateTime.Now.AddSeconds(rng.Next(20, 45));
             }
 
-            SlimeScale.ScaleX = breathScale - _impactOffset * 0.4;
-            SlimeScale.ScaleY = breathScale + _impactOffset * 0.6;
-            SlimeTranslate.Y = breathY;
+            // Autonomous desktop roaming hops when idle and enabled
+            if (_allowDesktopRoaming && !_isRoamingHopActive && !_isDraggingWindow &&
+                !isInteracting && !_isAsleep && !_isAfkSleeping && _currentPlayingState == "IDLE" &&
+                DateTime.Now >= _nextRoamingHopAt)
+            {
+                _nextRoamingHopAt = DateTime.Now.AddSeconds(rng.Next(35, 70));
+                _ = PerformRoamingHopAsync();
+            }
+
+            double finalScaleX = breathScale - _impactOffset * 0.4 - talkBob * 0.018;
+            double finalScaleY = breathScale + _impactOffset * 0.6 + talkBob * 0.032;
+            double finalY = breathY + _jumpOffsetY - talkBob * 3.0;
+
+            SlimeScale.ScaleX = finalScaleX;
+            SlimeScale.ScaleY = finalScaleY;
+            SlimeSkew.AngleX = organicIdleSway + _skewOffset;
+            SlimeTranslate.Y = finalY;
             SlimeTranslate.X = _flavorX;
-            SlimeRotate.Angle = _flavorAngle;
+            SlimeRotate.Angle = _flavorAngle * 0.4;
+
+            // Dynamic Ground Shadow reacts to height and squash
+            if (SlimeShadow != null && ShadowScale != null && ShadowTranslate != null)
+            {
+                double heightLift = Math.Max(0.0, -finalY);
+                double shadowWidthFactor = Math.Clamp(finalScaleX - heightLift * 0.012, 0.55, 1.35);
+                ShadowScale.ScaleX = shadowWidthFactor;
+                ShadowScale.ScaleY = Math.Clamp(1.0 - heightLift * 0.01, 0.6, 1.2);
+                ShadowTranslate.X = _flavorX;
+                SlimeShadow.Opacity = Math.Clamp(0.85 - heightLift * 0.018, 0.25, 0.9);
+            }
 
             // Periodic floating Zzz particles while sleeping
             if ((_isAsleep || _isAfkSleeping || _currentPlayingState == "SLEEP") && DateTime.Now >= _nextSleepZzzAt)
@@ -2020,7 +2202,295 @@ namespace SlimeHelper
                 _nextSleepZzzAt = DateTime.Now.AddSeconds(2.2);
             }
 
+            UpdatePaperDollMotion(t, dt);
             UpdateEmoteParticles(dt);
+        }
+
+        private static BitmapImage? LoadFrozenBitmap(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
+            try
+            {
+                var bitmap = new BitmapImage();
+                bitmap.BeginInit();
+                bitmap.UriSource = new Uri(path, UriKind.Absolute);
+                bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                bitmap.EndInit();
+                bitmap.Freeze();
+                return bitmap;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static PaperDollProfile? LoadPaperDollLayers(string stateDir)
+        {
+            var paths = PaperDollResolver.ResolveLayers(stateDir);
+            if (paths == null) return null;
+
+            var baseImg = LoadFrozenBitmap(paths.Base);
+            if (baseImg == null) return null;
+
+            BitmapImage? LoadOptional(string? path) => path != null ? LoadFrozenBitmap(path) : null;
+
+            return new PaperDollProfile
+            {
+                Base = baseImg,
+                EyeWhite = LoadOptional(paths.EyeWhite),
+                Eyes = LoadOptional(paths.Eyes),
+                EyesBlink = LoadOptional(paths.EyesBlink),
+                Nose = LoadOptional(paths.Nose),
+                MouthClosed = LoadOptional(paths.MouthClosed),
+                MouthOpen = LoadOptional(paths.MouthOpen),
+                MouthSmile = LoadOptional(paths.MouthSmile),
+                Eyebrows = LoadOptional(paths.Eyebrows),
+                HairLeft = LoadOptional(paths.HairLeft),
+                HairMid = LoadOptional(paths.HairMid),
+                HairRight = LoadOptional(paths.HairRight),
+                Overlay = LoadOptional(paths.Overlay),
+                OverlayFrames = paths.OverlayFrames.Select(LoadFrozenBitmap).OfType<BitmapImage>().ToList(),
+                MotionGroups = paths.MotionGroups
+                    .Select(g => g.Select(LoadFrozenBitmap).OfType<BitmapImage>().ToList())
+                    .Where(g => g.Count > 0)
+                    .ToList()
+            };
+        }
+
+        private void ActivatePaperDoll(PaperDollProfile pd)
+        {
+            _activePaperDoll = pd;
+            _isPaperDollBlinking = false;
+            _lastMouthMode = -1;
+            _lastOverlayFrameIdx = -1;
+            Array.Fill(_lastMotionFrameIdx, -1);
+            _eyeOffsetX = 0;
+            _eyeOffsetY = 0;
+            if (PdEyesTranslate != null)
+            {
+                PdEyesTranslate.X = 0;
+                PdEyesTranslate.Y = 0;
+            }
+
+            if (SlimeImageBack != null)
+            {
+                SlimeImageBack.BeginAnimation(OpacityProperty, null);
+                SlimeImageBack.Opacity = 0;
+                SlimeImageBack.Source = null;
+                SlimeImageBack.Visibility = Visibility.Collapsed;
+            }
+            SlimeImage.BeginAnimation(OpacityProperty, null);
+            SlimeImage.Source = null;
+            SlimeImage.Visibility = Visibility.Collapsed;
+
+            if (PaperDollHost == null) return;
+            PdBaseImage.Source = pd.Base;
+            PdEyeWhiteImage.Source = pd.EyeWhite;
+            PdEyesImage.Source = pd.Eyes;
+            PdNoseImage.Source = pd.Nose;
+            PdMouthImage.Source = pd.MouthSmile ?? pd.MouthClosed ?? pd.MouthOpen;
+            PdBlinkImage.Source = pd.EyesBlink;
+            PdBlinkImage.Visibility = Visibility.Collapsed;
+            PdEyeWhiteImage.Visibility = Visibility.Visible;
+            PdEyesImage.Visibility = Visibility.Visible;
+            PdEyebrowsImage.Source = pd.Eyebrows;
+            PdHairLeftImage.Source = pd.HairLeft;
+            PdHairMidImage.Source = pd.HairMid;
+            PdHairRightImage.Source = pd.HairRight;
+            PdOverlayImage.Source = pd.Overlay;
+            if (PdEffectImage != null)
+            {
+                PdEffectImage.Source = pd.OverlayFrames.Count > 0 ? pd.OverlayFrames[0] : null;
+            }
+            if (PdMotion1Image != null) PdMotion1Image.Source = pd.MotionGroups.Count > 0 ? pd.MotionGroups[0][0] : null;
+            if (PdMotion2Image != null) PdMotion2Image.Source = pd.MotionGroups.Count > 1 ? pd.MotionGroups[1][0] : null;
+            if (PdMotion3Image != null) PdMotion3Image.Source = pd.MotionGroups.Count > 2 ? pd.MotionGroups[2][0] : null;
+
+            PaperDollHost.Visibility = Visibility.Visible;
+        }
+
+        private void DeactivatePaperDoll()
+        {
+            if (_activePaperDoll == null) return;
+            _activePaperDoll = null;
+            _isPaperDollBlinking = false;
+            _lastMouthMode = -1;
+
+            if (PaperDollHost != null) PaperDollHost.Visibility = Visibility.Collapsed;
+            if (SlimeImageBack != null) SlimeImageBack.Visibility = Visibility.Visible;
+            SlimeImage.Visibility = Visibility.Visible;
+        }
+
+        private void SetPaperDollBlink(bool blinking)
+        {
+            if (_activePaperDoll == null || _activePaperDoll.EyesBlink == null || PaperDollHost == null) return;
+            _isPaperDollBlinking = blinking;
+            PdBlinkImage.Visibility = blinking ? Visibility.Visible : Visibility.Collapsed;
+            PdEyeWhiteImage.Visibility = blinking ? Visibility.Collapsed : Visibility.Visible;
+            PdEyesImage.Visibility = blinking ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        private void UpdatePaperDollMotion(double t, double dt)
+        {
+            if (_activePaperDoll == null || PaperDollHost == null || PaperDollHost.Visibility != Visibility.Visible) return;
+
+            // 1. Cursor Eye-Tracking (only active in IDLE so expression-specific poses keep their intended gaze)
+            double targetEyeX = 0;
+            double targetEyeY = 0;
+            if (_currentPlayingState == "IDLE" && !_isAsleep && !_isAfkSleeping && !_isPaperDollBlinking && GetCursorPos(out var cursorPt))
+            {
+                try
+                {
+                    var source = PresentationSource.FromVisual(this);
+                    double dpiX = source?.CompositionTarget?.TransformToDevice.M11 ?? 1.0;
+                    double dpiY = source?.CompositionTarget?.TransformToDevice.M22 ?? 1.0;
+
+                    double eyeScreenX = (Left + Width * 0.52) * dpiX;
+                    double eyeScreenY = (Top + Height * 0.42) * dpiY;
+
+                    double dx = cursorPt.X - eyeScreenX;
+                    double dy = cursorPt.Y - eyeScreenY;
+                    double dist = Math.Sqrt(dx * dx + dy * dy);
+                    if (dist > 12.0)
+                    {
+                        double normX = Math.Clamp(dx / 260.0, -1.0, 1.0);
+                        double normY = Math.Clamp(dy / 260.0, -1.0, 1.0);
+                        targetEyeX = normX * 2.2;
+                        targetEyeY = normY * 1.6;
+                    }
+                }
+                catch { }
+            }
+
+            double lerp = Math.Min(1.0, dt * 10.0);
+            _eyeOffsetX += (targetEyeX - _eyeOffsetX) * lerp;
+            _eyeOffsetY += (targetEyeY - _eyeOffsetY) * lerp;
+            if (PdEyesTranslate != null)
+            {
+                PdEyesTranslate.X = _eyeOffsetX;
+                PdEyesTranslate.Y = _eyeOffsetY;
+            }
+
+            // 2. Lip-sync while talking, smile when happy, closed otherwise
+            if (PdMouthImage != null)
+            {
+                bool isTalking = DateTime.Now < _talkingUntil && _currentPlayingState != "SLEEP" && !_isAsleep && !_isAfkSleeping;
+                int desiredMode;
+                BitmapImage? desiredBmp = null;
+
+                if (isTalking && _activePaperDoll.MouthOpen != null && (_activePaperDoll.MouthClosed != null || _activePaperDoll.MouthSmile != null))
+                {
+                    bool openPhase = ((int)(t * 8.0) % 2) == 0;
+                    desiredMode = openPhase ? 1 : 0;
+                    desiredBmp = openPhase
+                        ? _activePaperDoll.MouthOpen
+                        : (_activePaperDoll.MouthClosed ?? _activePaperDoll.MouthSmile);
+                }
+                else if (_currentMoodValue >= 55 && _activePaperDoll.MouthSmile != null)
+                {
+                    desiredMode = 2;
+                    desiredBmp = _activePaperDoll.MouthSmile;
+                }
+                else
+                {
+                    desiredMode = 0;
+                    desiredBmp = _activePaperDoll.MouthClosed ?? _activePaperDoll.MouthSmile ?? _activePaperDoll.MouthOpen;
+                }
+
+                if (desiredMode != _lastMouthMode && desiredBmp != null)
+                {
+                    _lastMouthMode = desiredMode;
+                    PdMouthImage.Source = desiredBmp;
+                }
+            }
+
+            // 3. Subtle secondary hair sway
+            double hairBaseSway = Math.Sin(t * 1.4 - 0.5) * 1.1 + _skewOffset * 0.22;
+            if (PdHairLeftRotate != null) PdHairLeftRotate.Angle = hairBaseSway;
+            if (PdHairMidRotate != null) PdHairMidRotate.Angle = hairBaseSway * 0.7;
+            if (PdHairRightRotate != null) PdHairRightRotate.Angle = hairBaseSway * 1.05;
+
+            // 4. Animated overlay frames (e.g. warning-1/2/3, screen-flicker-1/2/3, heart-1/2/3, drops-1/2)
+            if (PdEffectImage != null && _activePaperDoll.OverlayFrames.Count > 1)
+            {
+                int frameIdx = (int)(t * 5.5) % _activePaperDoll.OverlayFrames.Count;
+                if (frameIdx != _lastOverlayFrameIdx)
+                {
+                    _lastOverlayFrameIdx = frameIdx;
+                    PdEffectImage.Source = _activePaperDoll.OverlayFrames[frameIdx];
+                }
+            }
+
+            // 5. Independent slime-motion drip pairs (slimemotion-1-1/1-2, 2-1/2-2, 3-1/3-2)
+            Image?[] motionTargets = [PdMotion1Image, PdMotion2Image, PdMotion3Image];
+            for (int g = 0; g < Math.Min(3, _activePaperDoll.MotionGroups.Count); g++)
+            {
+                var group = _activePaperDoll.MotionGroups[g];
+                var targetImg = motionTargets[g];
+                if (targetImg == null || group.Count <= 1) continue;
+
+                int idx = (int)((t + g * 0.45) * 1.4) % group.Count;
+                if (idx != _lastMotionFrameIdx[g])
+                {
+                    _lastMotionFrameIdx[g] = idx;
+                    targetImg.Source = group[idx];
+                }
+            }
+        }
+
+        private async Task PerformRoamingHopAsync()
+        {
+            if (_isRoamingHopActive || _isDraggingWindow || _isAsleep || _isAfkSleeping) return;
+            _isRoamingHopActive = true;
+
+            try
+            {
+                var workArea = SystemParameters.WorkArea;
+                double minLeft = workArea.Left + 10;
+                double maxLeft = Math.Max(minLeft, workArea.Right - Width - 10);
+
+                double step = rng.Next(28, 62) * (rng.Next(0, 2) == 0 ? -1 : 1);
+                double targetLeft = Left + step;
+
+                // Reverse direction if near screen edges
+                if (targetLeft < minLeft || targetLeft > maxLeft)
+                {
+                    step = -step;
+                    targetLeft = Math.Clamp(Left + step, minLeft, maxLeft);
+                }
+
+                double startLeft = Left;
+                double actualStep = targetLeft - startLeft;
+                if (Math.Abs(actualStep) < 8) return;
+
+                // Anticipation crouch before jump
+                TriggerImpact(0.9);
+                _skewVelocity += actualStep > 0 ? -25.0 : 25.0;
+                await Task.Delay(90);
+
+                const int jumpDurationMs = 380;
+                var sw = Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < jumpDurationMs && !_isDraggingWindow && !_isAsleep)
+                {
+                    double p = Math.Min(1.0, sw.ElapsedMilliseconds / (double)jumpDurationMs);
+                    double easedX = 1 - Math.Pow(1 - p, 2);
+                    Left = startLeft + actualStep * easedX;
+
+                    // Parabolic jump arc
+                    _jumpOffsetY = -22.0 * 4.0 * p * (1.0 - p);
+                    await Task.Delay(16);
+                }
+
+                _jumpOffsetY = 0;
+                TriggerImpact(1.35);
+            }
+            catch { }
+            finally
+            {
+                _jumpOffsetY = 0;
+                _isRoamingHopActive = false;
+            }
         }
 
         private void SpawnEmoteBurst(string symbol, int count = 2, bool spin = false, bool isSlowFloat = false)
@@ -2354,6 +2824,26 @@ namespace SlimeHelper
         public string ObsidianVaultPath { get; set; } = "";
         public string ReposRootPath { get; set; } = "";
         public bool AutoStartWithWindows { get; set; } = false;
+        public bool AllowDesktopRoaming { get; set; } = true;
+    }
+
+    public class PaperDollProfile
+    {
+        public required BitmapImage Base { get; init; }
+        public BitmapImage? EyeWhite { get; init; }
+        public BitmapImage? Eyes { get; init; }
+        public BitmapImage? EyesBlink { get; init; }
+        public BitmapImage? Nose { get; init; }
+        public BitmapImage? MouthClosed { get; init; }
+        public BitmapImage? MouthOpen { get; init; }
+        public BitmapImage? MouthSmile { get; init; }
+        public BitmapImage? Eyebrows { get; init; }
+        public BitmapImage? HairLeft { get; init; }
+        public BitmapImage? HairMid { get; init; }
+        public BitmapImage? HairRight { get; init; }
+        public BitmapImage? Overlay { get; init; }
+        public List<BitmapImage> OverlayFrames { get; init; } = [];
+        public List<List<BitmapImage>> MotionGroups { get; init; } = [];
     }
 
     public class AnimationProfile
@@ -2361,5 +2851,6 @@ namespace SlimeHelper
         public List<string> Frames { get; set; } = [];
         public int FrameDelayMs { get; set; } = 150;
         public int LoopDelayMs { get; set; } = 0;
+        public PaperDollProfile? PaperDoll { get; set; }
     }
 }
