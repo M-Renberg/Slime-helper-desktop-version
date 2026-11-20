@@ -74,6 +74,7 @@ namespace SlimeHelper
         private double _skewVelocity = 0;
         private double _jumpOffsetY = 0;
         private double _jumpVelocityY = 0;
+        private double _lastDragVelX = 0;
         private double _lastDragY = 0;
         private DateTime _talkingUntil = DateTime.MinValue;
         private bool _allowDesktopRoaming = true;
@@ -326,14 +327,16 @@ namespace SlimeHelper
             LocationChanged += (s, e) =>
             {
                 if (!_isDraggingWindow) return;
-                double dx = Left - _lastDragX;
+                double velDx = Left - _lastDragVelX;
+                _lastDragVelX = Left;
                 double dy = Top - _lastDragY;
                 _lastDragY = Top;
 
-                // Apply pendulum skew & stretch inertia based on drag velocity
-                _skewVelocity += Math.Clamp(-dx * 3.8, -95.0, 95.0);
-                _impactVelocity += Math.Clamp(dy * 0.45, -12.0, 12.0);
+                // Apply gentle pendulum skew & stretch inertia based on per-step drag delta
+                _skewVelocity += Math.Clamp(-velDx * 1.4, -38.0, 38.0);
+                _impactVelocity += Math.Clamp(dy * 0.25, -7.0, 7.0);
 
+                double dx = Left - _lastDragX;
                 if (Math.Abs(dx) < 8) return;
 
                 int dir = dx > 0 ? 1 : -1;
@@ -359,6 +362,7 @@ namespace SlimeHelper
                 startWindowPos = new Point(Left, Top);
                 _isDraggingWindow = true;
                 _lastDragX = Left;
+                _lastDragVelX = Left;
                 _lastDragY = Top;
                 _lastDragDir = 0;
                 _shakeReversals = 0;
@@ -2121,7 +2125,7 @@ namespace SlimeHelper
             double skewForce = -skewStiffness * _skewOffset - skewDamping * _skewVelocity;
             _skewVelocity += skewForce * dt;
             _skewOffset += _skewVelocity * dt;
-            _skewOffset = Math.Clamp(_skewOffset, -16.0, 16.0);
+            _skewOffset = Math.Clamp(_skewOffset, -7.5, 7.5);
 
             double organicIdleSway = (_isAsleep || _isAfkSleeping)
                 ? Math.Sin(t * 0.45) * 0.25
@@ -2177,11 +2181,13 @@ namespace SlimeHelper
             double finalScaleY = breathScale + _impactOffset * 0.6 + talkBob * 0.032;
             double finalY = breathY + _jumpOffsetY - talkBob * 3.0;
 
+            double dragLagX = _skewOffset * 1.15;
+
             SlimeScale.ScaleX = finalScaleX;
             SlimeScale.ScaleY = finalScaleY;
             SlimeSkew.AngleX = organicIdleSway + _skewOffset;
             SlimeTranslate.Y = finalY;
-            SlimeTranslate.X = _flavorX;
+            SlimeTranslate.X = _flavorX + dragLagX;
             SlimeRotate.Angle = _flavorAngle * 0.4;
 
             // Dynamic Ground Shadow reacts to height and squash
@@ -2191,7 +2197,7 @@ namespace SlimeHelper
                 double shadowWidthFactor = Math.Clamp(finalScaleX - heightLift * 0.012, 0.55, 1.35);
                 ShadowScale.ScaleX = shadowWidthFactor;
                 ShadowScale.ScaleY = Math.Clamp(1.0 - heightLift * 0.01, 0.6, 1.2);
-                ShadowTranslate.X = _flavorX;
+                ShadowTranslate.X = _flavorX + dragLagX;
                 SlimeShadow.Opacity = Math.Clamp(0.85 - heightLift * 0.018, 0.25, 0.9);
             }
 
