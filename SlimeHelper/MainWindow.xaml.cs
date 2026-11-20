@@ -115,6 +115,7 @@ namespace SlimeHelper
 
         // Chat Window & Events
         private ChatWindow? _chatWindow;
+        private bool IsChatOpen => _chatWindow != null && _chatWindow.IsLoaded && _chatWindow.IsVisible;
         public event Action<string>? AiStatusChanged;
         public event Action<string, string>? AiResponseReceived;
         public event Action<string>? AiErrorOccurred;
@@ -301,7 +302,9 @@ namespace SlimeHelper
                     _lastFailedLogSnippet = logSnippet;
                     RecordMoodEvent("CI_FAILURE");
                     PlaySounds("Warning.wav");
-                    string failureMsg = $"CI failed on {run.Name} ({run.HeadBranch})!\nClick to inspect failure.";
+                    string? repoLabel = GitHubService.TryGetRepoNameFromUrl(run.HtmlUrl);
+                    string repoPrefix = !string.IsNullOrEmpty(repoLabel) ? $"{repoLabel}: " : "";
+                    string failureMsg = $"CI failed on {repoPrefix}{run.Name} ({run.HeadBranch})!\nClick to inspect failure.";
                     ShowTempMessage(failureMsg, "ERROR", 8);
                 });
             };
@@ -312,7 +315,9 @@ namespace SlimeHelper
                 {
                     RecordMoodEvent("CI_SUCCESS");
                     PlaySounds("Idle.wav");
-                    string successMsg = $"CI passed on {run.Name} ({run.HeadBranch})!";
+                    string? repoLabel = GitHubService.TryGetRepoNameFromUrl(run.HtmlUrl);
+                    string repoPrefix = !string.IsNullOrEmpty(repoLabel) ? $"{repoLabel}: " : "";
+                    string successMsg = $"CI passed on {repoPrefix}{run.Name} ({run.HeadBranch})!";
                     ShowTempMessage(successMsg, "HURRAY", 6);
                 });
             };
@@ -321,7 +326,8 @@ namespace SlimeHelper
                 ? settings.ReposRootPath
                 : Directory.GetCurrentDirectory();
             _activityWatcher.ActiveRepoPath = initialGhPath;
-            _gitHubWatcher.Start(initialGhPath, settings.GitHubToken);
+            RefreshGitHubWatchedRepos(initialGhPath);
+            _gitHubWatcher.Start(null, settings.GitHubToken);
 
             // Drag function, Drag Inertia & Window Shake detection
             LocationChanged += (s, e) =>
@@ -956,6 +962,7 @@ namespace SlimeHelper
                                 var (ok, msg) = _brainManager.BindRepo(parts[0], parts[1]);
                                 if (ok)
                                 {
+                                    RefreshGitHubWatchedRepos();
                                     ShowTempMessage($"Bound {msg} to this folder!", "CUTE", 4);
                                     PlaySounds("Idle.wav");
                                 }
@@ -1106,6 +1113,7 @@ namespace SlimeHelper
                 _chatWindow.WindowState = WindowState.Normal;
             }
             _chatWindow.Activate();
+            SpeechBubble.Visibility = Visibility.Collapsed;
         }
 
         private void OnOpenChatClick(object sender, RoutedEventArgs e)
@@ -1343,7 +1351,7 @@ namespace SlimeHelper
 
             SpeechText.Text = "Hmm... let me think...";
             SpeechText.Foreground = Brushes.Black;
-            SpeechBubble.Visibility = Visibility.Visible;
+            SpeechBubble.Visibility = IsChatOpen ? Visibility.Collapsed : Visibility.Visible;
             ShowSlimeReaction("THINKING", "");
             AiStatusChanged?.Invoke(SpeechText.Text);
 
@@ -1506,6 +1514,29 @@ namespace SlimeHelper
                 {
                     queryBuilder.AppendLine(SlimeToolManager.GetToolInstructions(targetRepoPath));
                 }
+                else
+                {
+                    queryBuilder.AppendLine(SlimeToolManager.GetMemoryToolInstructions());
+                }
+
+                // Include upcoming Google Calendar events when the user asks about schedule/week/meetings
+                if (File.Exists("credentials.json") && Regex.IsMatch(prompt, @"\b(schedule|calendar|kalender|schema|week|vecka|tomorrow|imorgon|today|idag|meeting|möte|events?|agenda|busy|free|ledig|upptagen)\b", RegexOptions.IgnoreCase))
+                {
+                    try
+                    {
+                        var calTask = _calendarWatcher.GetUpcomingEventsSummaryAsync(14, 15);
+                        if (await Task.WhenAny(calTask, Task.Delay(3500)) == calTask)
+                        {
+                            string? calSummary = await calTask;
+                            if (!string.IsNullOrWhiteSpace(calSummary))
+                            {
+                                queryBuilder.AppendLine("\n[Upcoming Google Calendar Events (Next 14 Days)]");
+                                queryBuilder.AppendLine(calSummary);
+                            }
+                        }
+                    }
+                    catch { }
+                }
 
                 if (!string.IsNullOrWhiteSpace(historyContext))
                 {
@@ -1562,6 +1593,8 @@ namespace SlimeHelper
                     followUpPrompt = await SlimeToolManager.RunCheckRequestsAsync(pendingChecks, targetRepoPath, activeThread, followUpPrompt);
                 }
 
+                followUpPrompt = await ExecutePendingCalendarEventsAsync(followUpPrompt);
+
                 // 3. AGENT-LOOP: Om hon bad om att få läsa en fil, skicka tillbaka filinnehållet till henne i smyg!
                 var agentLog = new System.Text.StringBuilder();
                 int rounds = 0;
@@ -1600,7 +1633,9 @@ namespace SlimeHelper
                     // Annars "kollar" hon bara och visar aldrig resultatet för användaren.
                     var loopBuilder = new System.Text.StringBuilder();
                     if (!string.IsNullOrEmpty(cwdHint)) loopBuilder.AppendLine(cwdHint + "\n");
-                    if (activeThread != "General") loopBuilder.AppendLine(SlimeToolManager.GetToolInstructions(targetRepoPath));
+                    loopBuilder.AppendLine(activeThread != "General"
+                        ? SlimeToolManager.GetToolInstructions(targetRepoPath)
+                        : SlimeToolManager.GetMemoryToolInstructions());
 
                     loopBuilder.AppendLine($"\n[Conversation History ({activeThread})]");
                     loopBuilder.AppendLine(_brainManager.GetHistoryContext(activeThread, 6));
@@ -1682,6 +1717,8 @@ namespace SlimeHelper
                         AiStatusChanged?.Invoke(cleanResponse);
                         followUpPrompt = await SlimeToolManager.RunCheckRequestsAsync(pendingChecks, targetRepoPath, activeThread, followUpPrompt);
                     }
+
+                    followUpPrompt = await ExecutePendingCalendarEventsAsync(followUpPrompt);
                 }
 
                 // 3b. Om hon fortfarande påstår något som aldrig skrevs: säg det rakt ut, och låt henne veta det i historiken
@@ -1698,6 +1735,7 @@ namespace SlimeHelper
 
                 // 4. Visa det slutgiltiga resultatet i appen
                 SpeechText.Text = cleanResponse;
+                SpeechBubble.Visibility = IsChatOpen ? Visibility.Collapsed : Visibility.Visible;
                 if (!string.IsNullOrWhiteSpace(cleanResponse))
                 {
                     _talkingUntil = DateTime.Now.AddMilliseconds(Math.Clamp(cleanResponse.Length * 25, 800, 2200));
@@ -1710,6 +1748,7 @@ namespace SlimeHelper
             catch (Exception ex)
             {
                 SpeechText.Text = $"Brain freeze! {ex.Message}";
+                SpeechBubble.Visibility = IsChatOpen ? Visibility.Collapsed : Visibility.Visible;
                 AiErrorOccurred?.Invoke(ex.Message);
                 WriteCliResponse(cliRequestId, SpeechText.Text, true);
                 TriggerTalkingForText(SpeechText.Text, "ERROR");
@@ -1829,6 +1868,27 @@ namespace SlimeHelper
             });
         }
 
+        private async Task<string> ExecutePendingCalendarEventsAsync(string followUpPrompt)
+        {
+            var requests = SlimeToolManager.TakePendingCalendarEvents();
+            if (requests.Count == 0) return followUpPrompt;
+
+            var sb = new System.Text.StringBuilder(followUpPrompt);
+            sb.AppendLine("\n[Google Calendar Results]");
+            foreach (var req in requests)
+            {
+                if (req.ParseError != null)
+                {
+                    sb.AppendLine($"- FAILED ({req.Title}): {req.ParseError}");
+                    continue;
+                }
+
+                var (ok, msg) = await _calendarWatcher.AddStructuredEventAsync(req.Title, req.Start, req.DurationMinutes, req.Description);
+                sb.AppendLine(ok ? $"- SUCCESS: {msg}" : $"- FAILED: {msg}");
+            }
+            return sb.ToString();
+        }
+
         private async Task CheckCalendarAsync()
         {
             try
@@ -1864,11 +1924,24 @@ namespace SlimeHelper
 
                 _codeWatcher.Start(currentSettings.ReposRootPath);
                 _activityWatcher.ActiveRepoPath = currentSettings.ReposRootPath;
-                _gitHubWatcher.SetActiveRepo(currentSettings.ReposRootPath);
+                RefreshGitHubWatchedRepos(currentSettings.ReposRootPath);
 
                 ShowTempMessage("Git Repositories folder linked!", "NOTES", 3);
                 PlaySounds("Idle.wav");
             }
+        }
+
+        private void RefreshGitHubWatchedRepos(string? extraPath = null)
+        {
+            var paths = new List<string>();
+            var currentSettings = LoadFullSettings();
+            if (!string.IsNullOrWhiteSpace(currentSettings.ReposRootPath))
+                paths.Add(currentSettings.ReposRootPath);
+            paths.AddRange(_brainManager.GetBoundRepos().Values);
+            if (!string.IsNullOrWhiteSpace(extraPath))
+                paths.Add(extraPath);
+
+            _gitHubWatcher.SetWatchedPaths(paths);
         }
 
         private void OnSetGitHubTokenClick(object sender, RoutedEventArgs e)
@@ -2779,6 +2852,7 @@ namespace SlimeHelper
                                     var (ok, msg) = _brainManager.BindRepo(tag, path);
                                     if (ok)
                                     {
+                                        RefreshGitHubWatchedRepos();
                                         ShowTempMessage($"Bound {msg} to this folder!", "CUTE", 4);
                                         PlaySounds("Idle.wav");
                                         WriteCliResponse(requestId, $"Bound {msg} → {path}");

@@ -1202,6 +1202,44 @@ namespace SlimeHelper.Checks
                       && error.OverlayFrames.Count == 5,
                       "Girl/ERROR resolves base.PNG, eyes, blink, mouths, and 5 drops frames");
             }
+
+            // 4. Multi-repo GitHubWatcher discovery & URL repo extraction
+            Check(GitHubService.TryGetRepoNameFromUrl("https://github.com/octocat/hello-world/actions/runs/123") == "octocat/hello-world",
+                  "TryGetRepoNameFromUrl extracts owner/repo from workflow URL");
+
+            string multiRoot = Path.Combine(work, "MultiRepoRoot");
+            string r1 = Path.Combine(multiRoot, "alpha");
+            string r2 = Path.Combine(multiRoot, "beta");
+            Directory.CreateDirectory(Path.Combine(r1, ".git"));
+            Directory.CreateDirectory(Path.Combine(r2, ".git"));
+            File.WriteAllText(Path.Combine(r1, ".git", "config"), "[remote \"origin\"]\n\turl = https://github.com/user/alpha.git\n");
+            File.WriteAllText(Path.Combine(r2, ".git", "config"), "[remote \"origin\"]\n\turl = git@github.com:user/beta.git\n");
+
+            using var ghWatcher = new GitHubWatcher();
+            ghWatcher.SetWatchedPaths(new[] { multiRoot, r1 }); // r1 duplicated via parent + direct path
+            Check(ghWatcher.WatchedRepos.Count == 2
+                  && ghWatcher.WatchedRepos.Any(r => r.owner == "user" && r.repo == "alpha")
+                  && ghWatcher.WatchedRepos.Any(r => r.owner == "user" && r.repo == "beta"),
+                  "GitHubWatcher.SetWatchedPaths discovers and deduplicates multiple repos under a parent folder");
+
+            // 5. REMEMBER user_name in General updates both memory_bank.json and profile.json UserName
+            string memBrainRoot = Path.Combine(work, "UserNameMemBrain");
+            var memBrain = new SlimeBrainManager(memBrainRoot);
+            SlimeToolManager.ProcessResponse("Nice to meet you!\n[REMEMBER: user_name | Fact | #identity]\nMikko\n[/REMEMBER]", "General", "", memBrain, out _, out _);
+            Check(memBrain.LoadMemory().UserName == "Mikko", "REMEMBER user_name in General updates profile UserName to Mikko");
+            Check(SlimeToolManager.GetMemoryToolInstructions().Contains("[REMEMBER:"), "GetMemoryToolInstructions exposes REMEMBER tool for General");
+
+            // 6. Calendar ADD_CALENDAR parsing (single-line and block form)
+            SlimeToolManager.ResetModificationCount();
+            string calUi = SlimeToolManager.ProcessResponse(
+                "Sure!\n[ADD_CALENDAR: Dentist | 2026-11-24 14:00 | 45]\n[ADD_CALENDAR: Team Sync | 2026-11-25 10:00]\nWeekly review\n[/ADD_CALENDAR]",
+                "General", "", memBrain, out _, out _);
+            var calReqs = SlimeToolManager.TakePendingCalendarEvents();
+            Check(calReqs.Count == 2
+                  && calReqs[0].Title == "Dentist" && calReqs[0].DurationMinutes == 45 && calReqs[0].ParseError == null
+                  && calReqs[1].Title == "Team Sync" && calReqs[1].DurationMinutes == 60 && calReqs[1].Description == "Weekly review"
+                  && calUi.Contains("Scheduling \"Dentist\""),
+                  "ADD_CALENDAR parses single-line and block-form event requests");
         }
 
         static string? FindRepoRoot()

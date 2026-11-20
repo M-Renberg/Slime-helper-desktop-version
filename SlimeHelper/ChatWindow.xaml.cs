@@ -438,6 +438,10 @@ namespace SlimeHelper
                 string repoText = repoInfo.HasValue
                     ? $"{repoInfo.Value.owner}/{repoInfo.Value.repo} (at {GetActiveRepoPath()})"
                     : "No GitHub repository detected";
+                var watched = _gitHubWatcher?.WatchedRepos;
+                string watchedLine = watched != null && watched.Count > 1
+                    ? $"\n• Watched Repositories ({watched.Count}): {string.Join(", ", watched.Select(r => $"{r.owner}/{r.repo}"))}"
+                    : "";
 
                 if (ok)
                 {
@@ -447,7 +451,7 @@ namespace SlimeHelper
                         $"• Authenticated User: @{user}\n" +
                         $"• Rate Limit Remaining: {rateRemaining} calls\n" +
                         $"• Auth Source: {authSource}\n" +
-                        $"• Active Repository: {repoText}\n\n" +
+                        $"• Active Repository: {repoText}{watchedLine}\n\n" +
                         $"💡 Type `/gh runs` to inspect recent workflow runs or `/pr <title>` to create a pull request.");
                 }
                 else

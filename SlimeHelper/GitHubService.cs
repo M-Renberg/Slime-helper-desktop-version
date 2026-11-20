@@ -213,6 +213,13 @@ namespace SlimeHelper
             return null;
         }
 
+        public static string? TryGetRepoNameFromUrl(string? htmlUrl)
+        {
+            if (string.IsNullOrWhiteSpace(htmlUrl)) return null;
+            var match = Regex.Match(htmlUrl, @"github\.com/([^/]+/[^/]+)", RegexOptions.IgnoreCase);
+            return match.Success ? match.Groups[1].Value : null;
+        }
+
         public static string ResolveToken(string? explicitToken = null)
         {
             if (!string.IsNullOrWhiteSpace(explicitToken))

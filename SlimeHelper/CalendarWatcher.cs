@@ -72,6 +72,53 @@ namespace SlimeHelper
             return null;
         }
 
+        public async Task<string?> GetUpcomingEventsSummaryAsync(int days = 14, int maxEvents = 15)
+        {
+            if (!File.Exists("credentials.json")) return null;
+
+            try
+            {
+                var service = await CreateServiceAsync();
+                var now = DateTimeOffset.Now;
+                var horizon = now.AddDays(days);
+
+                List<CalendarRef> calendars = await GetVisibleCalendarsAsync(service);
+                if (calendars.Count == 0)
+                {
+                    calendars.Add(new CalendarRef("primary", "primary", true));
+                }
+
+                var perCalendar = await Task.WhenAll(calendars.Select(c => FetchUpcomingAsync(service, c, now, 15)));
+                var upcoming = CalendarMerge.MergeUpcoming(perCalendar.SelectMany(x => x))
+                    .Where(e => e.Start <= horizon)
+                    .Take(maxEvents)
+                    .ToList();
+
+                if (upcoming.Count == 0)
+                {
+                    return $"No upcoming Google Calendar events in the next {days} days.";
+                }
+
+                var sb = new System.Text.StringBuilder();
+                foreach (var item in upcoming)
+                {
+                    string when = item.AllDay
+                        ? item.Start.ToString("yyyy-MM-dd (ddd) 'All day'")
+                        : item.Start.ToString("yyyy-MM-dd (ddd) HH:mm");
+                    string cal = calendars.Count > 1 && !string.IsNullOrWhiteSpace(item.Calendar.Name)
+                        ? $" [{item.Calendar.Name}]"
+                        : "";
+                    sb.AppendLine($"- {when}: {item.Summary}{cal}");
+                }
+                return sb.ToString().TrimEnd();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Calendar Summary Error: {ex.Message}");
+                return null;
+            }
+        }
+
         private async Task<List<CalendarRef>> GetVisibleCalendarsAsync(CalendarService service)
         {
             var result = new List<CalendarRef>();
@@ -113,7 +160,7 @@ namespace SlimeHelper
             return result;
         }
 
-        private static async Task<List<CalendarItem>> FetchUpcomingAsync(CalendarService service, CalendarRef calendar, DateTimeOffset now)
+        private static async Task<List<CalendarItem>> FetchUpcomingAsync(CalendarService service, CalendarRef calendar, DateTimeOffset now, int maxResults = 5)
         {
             var items = new List<CalendarItem>();
 
@@ -125,7 +172,7 @@ namespace SlimeHelper
                 request.ShowDeleted = false;
                 request.SingleEvents = true;
                 request.OrderBy = EventsResource.ListRequest.OrderByEnum.StartTime;
-                request.MaxResults = 5;
+                request.MaxResults = maxResults;
 
                 Events events = await request.ExecuteAsync();
                 if (events.Items != null)
@@ -172,6 +219,42 @@ namespace SlimeHelper
 
             string summary = string.IsNullOrWhiteSpace(e.Summary) ? "(no title)" : e.Summary.Trim();
             return new CalendarItem(calendar, summary, start, allDay, e.ICalUID);
+        }
+
+        public async Task<(bool Success, string Message)> AddStructuredEventAsync(
+            string title,
+            DateTimeOffset start,
+            int durationMinutes = 60,
+            string? description = null)
+        {
+            if (string.IsNullOrWhiteSpace(title))
+                return (false, "Event title cannot be empty.");
+
+            if (!File.Exists("credentials.json"))
+                return (false, "Google Calendar credentials.json not found.");
+
+            try
+            {
+                var service = await CreateServiceAsync();
+                int clampedDuration = Math.Clamp(durationMinutes, 5, 24 * 60);
+                DateTimeOffset end = start.AddMinutes(clampedDuration);
+
+                var newEvent = new Event
+                {
+                    Summary = title.Trim(),
+                    Description = string.IsNullOrWhiteSpace(description) ? null : description.Trim(),
+                    Start = new EventDateTime { DateTimeDateTimeOffset = start },
+                    End = new EventDateTime { DateTimeDateTimeOffset = end }
+                };
+
+                await service.Events.Insert(newEvent, "primary").ExecuteAsync();
+                return (true, $"Scheduled \"{title.Trim()}\" on {start:yyyy-MM-dd HH:mm} ({clampedDuration} min).");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error adding structured event: {ex.Message}");
+                return (false, $"Failed to add Google Calendar event: {ex.Message}");
+            }
         }
 
         public async Task<bool> AddEventAsync(string input)

@@ -633,6 +633,17 @@ namespace SlimeHelper
                 };
 
                 var saved = memory.AddOrUpdateNode(node);
+
+                // Keep profile UserName in sync when saving a user_name / name fact
+                if (key.Trim().ToLowerInvariant() is "user_name" or "username" or "name" or "owner_name")
+                {
+                    string candidate = content.Trim().Split('\n')[0].Trim();
+                    if (!string.IsNullOrWhiteSpace(candidate) && candidate.Length <= 60)
+                    {
+                        memory.UserName = candidate;
+                    }
+                }
+
                 SaveMemory(memory);
                 return (true, $"Remembered '{saved.Key}'", saved);
             }

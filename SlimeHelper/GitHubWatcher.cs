@@ -10,11 +10,21 @@ namespace SlimeHelper
 {
     public class GitHubWatcher : IDisposable
     {
+        private sealed class RepoWatchEntry
+        {
+            public required string Key { get; init; }
+            public required string Owner { get; init; }
+            public required string Repo { get; init; }
+            public string? Path { get; set; }
+            public Dictionary<long, string> RunConclusions { get; } = new();
+            public bool IsFirstPoll { get; set; } = true;
+        }
+
         private readonly GitHubService _service;
         private readonly System.Timers.Timer _timer;
         private readonly SemaphoreSlim _pollLock = new(1, 1);
-        private readonly Dictionary<long, string> _runConclusions = new();
-        private bool _isFirstPoll = true;
+        private readonly Dictionary<string, RepoWatchEntry> _watchedRepos = new(StringComparer.OrdinalIgnoreCase);
+        private readonly object _watchLock = new();
         private bool _disposed = false;
 
         public event Action<GitHubWorkflowRun, string?>? OnWorkflowFailed;
@@ -24,6 +34,17 @@ namespace SlimeHelper
         public string? ActiveRepoPath { get; private set; }
         public string? GitHubToken { get; set; }
         public (string owner, string repo)? CurrentRepo { get; private set; }
+
+        public IReadOnlyList<(string owner, string repo)> WatchedRepos
+        {
+            get
+            {
+                lock (_watchLock)
+                {
+                    return _watchedRepos.Values.Select(e => (e.Owner, e.Repo)).ToList();
+                }
+            }
+        }
 
         public TimeSpan IdleInterval { get; set; } = TimeSpan.FromSeconds(30);
         public TimeSpan ActiveInterval { get; set; } = TimeSpan.FromSeconds(15);
@@ -49,15 +70,100 @@ namespace SlimeHelper
 
             ActiveRepoPath = directory;
             var repoInfo = GitHubService.GetRepoInfo(directory);
-            if (repoInfo.HasValue && (CurrentRepo == null || CurrentRepo.Value != repoInfo.Value))
+            if (repoInfo.HasValue)
             {
-                CurrentRepo = repoInfo.Value;
-                lock (_runConclusions)
+                string key = $"{repoInfo.Value.owner}/{repoInfo.Value.repo}";
+                lock (_watchLock)
                 {
-                    _runConclusions.Clear();
+                    if (!_watchedRepos.ContainsKey(key))
+                    {
+                        _watchedRepos[key] = new RepoWatchEntry
+                        {
+                            Key = key,
+                            Owner = repoInfo.Value.owner,
+                            Repo = repoInfo.Value.repo,
+                            Path = directory
+                        };
+                    }
+                    else
+                    {
+                        _watchedRepos[key].Path = directory;
+                    }
                 }
-                _isFirstPoll = true;
-                Debug.WriteLine($"GitHubWatcher: Switched to repo {CurrentRepo.Value.owner}/{CurrentRepo.Value.repo}");
+
+                if (CurrentRepo == null || CurrentRepo.Value != repoInfo.Value)
+                {
+                    CurrentRepo = repoInfo.Value;
+                    Debug.WriteLine($"GitHubWatcher: Switched active repo to {key}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Discovers all GitHub repositories across the given paths (both direct git repos
+        /// and immediate subdirectories of workspace root folders) and watches them concurrently.
+        /// </summary>
+        public void SetWatchedPaths(IEnumerable<string?> directories)
+        {
+            var discovered = new Dictionary<string, (string owner, string repo, string path)>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var dir in directories)
+            {
+                if (string.IsNullOrWhiteSpace(dir) || !System.IO.Directory.Exists(dir)) continue;
+
+                var direct = GitHubService.GetRepoInfo(dir);
+                if (direct.HasValue)
+                {
+                    string key = $"{direct.Value.owner}/{direct.Value.repo}";
+                    discovered.TryAdd(key, (direct.Value.owner, direct.Value.repo, dir));
+                    continue;
+                }
+
+                // If dir is a parent folder (e.g. ReposRootPath), scan immediate subdirectories for git repos
+                try
+                {
+                    foreach (var subDir in System.IO.Directory.GetDirectories(dir))
+                    {
+                        var subInfo = GitHubService.GetRepoInfo(subDir);
+                        if (subInfo.HasValue)
+                        {
+                            string key = $"{subInfo.Value.owner}/{subInfo.Value.repo}";
+                            discovered.TryAdd(key, (subInfo.Value.owner, subInfo.Value.repo, subDir));
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            lock (_watchLock)
+            {
+                var toRemove = _watchedRepos.Keys.Where(k => !discovered.ContainsKey(k)).ToList();
+                foreach (var key in toRemove) _watchedRepos.Remove(key);
+
+                foreach (var (key, info) in discovered)
+                {
+                    if (_watchedRepos.TryGetValue(key, out var existing))
+                    {
+                        existing.Path = info.path;
+                    }
+                    else
+                    {
+                        _watchedRepos[key] = new RepoWatchEntry
+                        {
+                            Key = key,
+                            Owner = info.owner,
+                            Repo = info.repo,
+                            Path = info.path
+                        };
+                    }
+                }
+
+                if (CurrentRepo == null && _watchedRepos.Count > 0)
+                {
+                    var first = _watchedRepos.Values.First();
+                    CurrentRepo = (first.Owner, first.Repo);
+                    if (string.IsNullOrWhiteSpace(ActiveRepoPath)) ActiveRepoPath = first.Path;
+                }
             }
         }
 
@@ -113,69 +219,100 @@ namespace SlimeHelper
                     }
                 }
 
-                // If repo not set or discovered, try from ActiveRepoPath
-                if (CurrentRepo == null && !string.IsNullOrWhiteSpace(ActiveRepoPath))
+                // Discover repos from ActiveRepoPath if nothing has been registered yet
+                List<RepoWatchEntry> snapshot;
+                lock (_watchLock)
                 {
-                    SetActiveRepo(ActiveRepoPath);
+                    snapshot = _watchedRepos.Values.ToList();
                 }
 
-                if (CurrentRepo == null)
+                if (snapshot.Count == 0 && !string.IsNullOrWhiteSpace(ActiveRepoPath))
+                {
+                    SetWatchedPaths(new[] { ActiveRepoPath });
+                    lock (_watchLock)
+                    {
+                        snapshot = _watchedRepos.Values.ToList();
+                    }
+                }
+
+                if (snapshot.Count == 0)
                 {
                     ScheduleNext(IdleInterval);
                     return;
                 }
 
-                var (owner, repo) = CurrentRepo.Value;
-                var runs = await _service.GetLatestRunsAsync(owner, repo, limit: 10, token: GitHubToken);
-
                 bool hasActiveRuns = false;
 
-                foreach (var run in runs)
+                foreach (var entry in snapshot)
                 {
-                    bool isInProgress = string.Equals(run.Status, "in_progress", StringComparison.OrdinalIgnoreCase) ||
-                                       string.Equals(run.Status, "queued", StringComparison.OrdinalIgnoreCase);
+                    if (_disposed) break;
 
-                    if (isInProgress)
+                    if (_service.LastRateRemaining < 5)
                     {
-                        hasActiveRuns = true;
+                        var waitDuration = _service.LastRateReset - DateTimeOffset.UtcNow;
+                        if (waitDuration > TimeSpan.Zero)
+                        {
+                            nextInterval = waitDuration < TimeSpan.FromMinutes(60) ? waitDuration : TimeSpan.FromMinutes(60);
+                            Debug.WriteLine($"GitHubWatcher: Rate limit low ({_service.LastRateRemaining}). Backing off for {nextInterval.TotalSeconds}s");
+                            ScheduleNext(nextInterval);
+                            return;
+                        }
                     }
 
-                    string currentConclusion = run.Conclusion ?? run.Status ?? "unknown";
-
-                    lock (_runConclusions)
+                    try
                     {
-                        if (_isFirstPoll)
-                        {
-                            // Seed initial history so we do not notify on stale runs on launch
-                            _runConclusions[run.Id] = currentConclusion;
-                            continue;
-                        }
+                        var runs = await _service.GetLatestRunsAsync(entry.Owner, entry.Repo, limit: 10, token: GitHubToken);
 
-                        bool hadPreviousState = _runConclusions.TryGetValue(run.Id, out string? prevConclusion);
-                        _runConclusions[run.Id] = currentConclusion;
-
-                        if (!hadPreviousState)
+                        foreach (var run in runs)
                         {
-                            // Brand new run detected
-                            if (string.Equals(run.Status, "completed", StringComparison.OrdinalIgnoreCase))
+                            bool isInProgress = string.Equals(run.Status, "in_progress", StringComparison.OrdinalIgnoreCase) ||
+                                               string.Equals(run.Status, "queued", StringComparison.OrdinalIgnoreCase);
+
+                            if (isInProgress)
                             {
-                                HandleCompletedRun(owner, repo, run);
+                                hasActiveRuns = true;
+                            }
+
+                            string currentConclusion = run.Conclusion ?? run.Status ?? "unknown";
+
+                            lock (entry.RunConclusions)
+                            {
+                                if (entry.IsFirstPoll)
+                                {
+                                    // Seed initial history so we do not notify on stale runs on launch
+                                    entry.RunConclusions[run.Id] = currentConclusion;
+                                    continue;
+                                }
+
+                                bool hadPreviousState = entry.RunConclusions.TryGetValue(run.Id, out string? prevConclusion);
+                                entry.RunConclusions[run.Id] = currentConclusion;
+
+                                if (!hadPreviousState)
+                                {
+                                    if (string.Equals(run.Status, "completed", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        HandleCompletedRun(entry.Owner, entry.Repo, run);
+                                    }
+                                }
+                                else if (!string.Equals(prevConclusion, currentConclusion, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    if (string.Equals(run.Status, "completed", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        HandleCompletedRun(entry.Owner, entry.Repo, run);
+                                    }
+                                }
                             }
                         }
-                        else if (!string.Equals(prevConclusion, currentConclusion, StringComparison.OrdinalIgnoreCase))
+
+                        if (entry.IsFirstPoll)
                         {
-                            // State changed!
-                            if (string.Equals(run.Status, "completed", StringComparison.OrdinalIgnoreCase))
-                            {
-                                HandleCompletedRun(owner, repo, run);
-                            }
+                            entry.IsFirstPoll = false;
                         }
                     }
-                }
-
-                if (_isFirstPoll)
-                {
-                    _isFirstPoll = false;
+                    catch (Exception repoEx)
+                    {
+                        Debug.WriteLine($"GitHubWatcher error polling {entry.Key}: {repoEx.Message}");
+                    }
                 }
 
                 nextInterval = hasActiveRuns ? ActiveInterval : IdleInterval;

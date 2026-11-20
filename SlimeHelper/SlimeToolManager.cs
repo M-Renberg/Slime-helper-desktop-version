@@ -92,11 +92,57 @@ namespace SlimeHelper
         /// <summary>Antal lyckade skrivningar (fil ändrad/skapad, anteckning sparad) sedan senaste ResetModificationCount.</summary>
         public static int ModificationCount { get; private set; }
 
+        public sealed record CalendarEventRequest(
+            string Title,
+            DateTimeOffset Start,
+            int DurationMinutes,
+            string? Description,
+            string? ParseError);
+
+        private static readonly List<CalendarEventRequest> PendingCalendarEvents = new();
+
+        public static List<CalendarEventRequest> TakePendingCalendarEvents()
+        {
+            lock (PendingCalendarEvents)
+            {
+                var copy = PendingCalendarEvents.ToList();
+                PendingCalendarEvents.Clear();
+                return copy;
+            }
+        }
+
+        public static CalendarEventRequest ParseCalendarEventRequest(string header, string? description = null)
+        {
+            var parts = header.Split('|', StringSplitOptions.TrimEntries);
+            string title = parts.Length > 0 ? parts[0].Trim() : "";
+            if (string.IsNullOrWhiteSpace(title))
+                return new CalendarEventRequest("", default, 60, description, "Missing event title.");
+
+            if (parts.Length < 2 || string.IsNullOrWhiteSpace(parts[1]))
+                return new CalendarEventRequest(title, default, 60, description, $"Missing date/time for '{title}'. Use yyyy-MM-dd HH:mm.");
+
+            string dateText = parts[1].Trim();
+            if (!DateTimeOffset.TryParse(dateText, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeLocal, out var start)
+                && !DateTimeOffset.TryParse(dateText, System.Globalization.CultureInfo.CurrentCulture, System.Globalization.DateTimeStyles.AssumeLocal, out start))
+            {
+                return new CalendarEventRequest(title, default, 60, description, $"Could not parse date/time '{dateText}'. Use yyyy-MM-dd HH:mm.");
+            }
+
+            int duration = 60;
+            if (parts.Length >= 3 && int.TryParse(parts[2], out int parsedDur) && parsedDur > 0)
+            {
+                duration = Math.Clamp(parsedDur, 5, 24 * 60);
+            }
+
+            return new CalendarEventRequest(title, start, duration, string.IsNullOrWhiteSpace(description) ? null : description.Trim(), null);
+        }
+
         public static void ResetModificationCount()
         {
             ModificationCount = 0;
             WriteFailureCount = 0;
             lock (Activity) { Activity.Clear(); }
+            lock (PendingCalendarEvents) { PendingCalendarEvents.Clear(); }
         }
 
         /// <summary>Antal misslyckade ändringar/skrivningar (används för att inte bygga kod som ändringen aldrig nådde).</summary>
@@ -339,6 +385,25 @@ namespace SlimeHelper
             return m.Success ? response.Substring(0, m.Index).TrimEnd() : response;
         }
 
+        public static string GetMemoryToolInstructions()
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("[Memory & Calendar Tools (SlimeBrain)]");
+            sb.AppendLine($"Current local date/time: {DateTime.Now:yyyy-MM-dd (dddd) HH:mm}");
+            sb.AppendLine("You do NOT have code/file editing tools in General, but you DO have your Memory Bank and Google Calendar tools.");
+            sb.AppendLine("When the user shares their name, preferences, or important facts (e.g. \"I'm Mikko\"), proactively save them with:");
+            sb.AppendLine("[REMEMBER: key | Category | #tag1, #tag2]\nfact content\n[/REMEMBER]");
+            sb.AppendLine("Use key `user_name` when saving the user's name (e.g. [REMEMBER: user_name | Fact | #identity]Mikko[/REMEMBER]).");
+            sb.AppendLine("Categories: Fact, UserPreference, ProjectDecision, Architecture, Concept, Rule.");
+            sb.AppendLine("To link memories: [CONNECT_MEMORY: source_key -> relation -> target_key]");
+            sb.AppendLine("To search memories: [RECALL_MEMORY: query or #tag]");
+            sb.AppendLine("To forget a memory: [FORGET_MEMORY: key]");
+            sb.AppendLine("To add an event to the user's Google Calendar (only when asked to schedule/add an event):");
+            sb.AppendLine("[ADD_CALENDAR: Event Title | yyyy-MM-dd HH:mm | 60]");
+            sb.AppendLine("(Optional 3rd field is duration in minutes, default 60. Use exact yyyy-MM-dd HH:mm based on the current date above.)");
+            return sb.ToString();
+        }
+
         public static string GetToolInstructions(string targetRepoPath)
         {
             var sb = new System.Text.StringBuilder();
@@ -360,9 +425,12 @@ namespace SlimeHelper
             sb.AppendLine("To store structured facts, user preferences, project decisions, or architectural rules in your interconnected memory network, use:");
             sb.AppendLine("[REMEMBER: key | Category | #tag1, #tag2]\nfact or insight content\n[/REMEMBER]");
             sb.AppendLine("Categories: Fact, UserPreference, ProjectDecision, Architecture, Concept, Rule (default is Fact).");
+            sb.AppendLine("When the user shares their name or important personal facts/preferences (e.g. \"I'm Mikko\"), save it proactively with [REMEMBER: user_name | Fact | #identity]Mikko[/REMEMBER].");
             sb.AppendLine("To link memories in your knowledge network: [CONNECT_MEMORY: source_key -> relation -> target_key]");
             sb.AppendLine("To search your memory network: [RECALL_MEMORY: query or #tag]");
             sb.AppendLine("To remove an outdated memory: [FORGET_MEMORY: key]");
+            sb.AppendLine($"To add a Google Calendar event (current local date/time: {DateTime.Now:yyyy-MM-dd (dddd) HH:mm}):");
+            sb.AppendLine("[ADD_CALENDAR: Event Title | yyyy-MM-dd HH:mm | 60]");
 
             if (!string.IsNullOrEmpty(targetRepoPath))
             {
@@ -522,6 +590,21 @@ namespace SlimeHelper
                 }
                 return $"\n*(I couldn't link memories: {msg} 🔒)*\n";
             }, RegexOptions.IgnoreCase);
+
+            // Google Calendar Tool: ADD_CALENDAR (single-pass so document order is preserved for both single-line and block forms)
+            cleanResponse = Regex.Replace(
+                cleanResponse,
+                @"\[ADD_CALENDAR:\s*([^\]]+)\](?:\s*\r?\n((?:(?!\[ADD_CALENDAR:)[\s\S])*?)\[/ADD_CALENDAR\])?",
+                m =>
+                {
+                    string? body = m.Groups[2].Success ? m.Groups[2].Value : null;
+                    var req = ParseCalendarEventRequest(m.Groups[1].Value.Trim(), body);
+                    lock (PendingCalendarEvents) { PendingCalendarEvents.Add(req); }
+                    return req.ParseError == null
+                        ? $"\n*(Scheduling \"{req.Title}\" in Google Calendar... 📅)*\n"
+                        : $"\n*(I couldn't schedule that calendar event: {req.ParseError})*\n";
+                },
+                RegexOptions.IgnoreCase);
 
             // Memory Bank Tool: RECALL_MEMORY
             cleanResponse = Regex.Replace(cleanResponse, @"\[RECALL_MEMORY:\s*([^\]]+?)\]", m =>
