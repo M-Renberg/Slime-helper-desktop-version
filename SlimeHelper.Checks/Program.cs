@@ -1193,6 +1193,14 @@ namespace SlimeHelper.Checks
                 var scared = PaperDollResolver.ResolveLayers(Path.Combine(girlDir, "SCARED"));
                 Check(scared != null && scared.Eyes != null && scared.MouthClosed != null && scared.MouthOpen != null,
                       "Girl/SCARED resolves eyes-open, mouth-closed, and mouth-open");
+
+                var error = PaperDollResolver.ResolveLayers(Path.Combine(girlDir, "ERROR"));
+                Check(error != null
+                      && Path.GetFileName(error.Base).Equals("base.PNG", StringComparison.OrdinalIgnoreCase)
+                      && error.Eyes != null && error.EyesBlink != null
+                      && error.MouthClosed != null && error.MouthOpen != null
+                      && error.OverlayFrames.Count == 5,
+                      "Girl/ERROR resolves base.PNG, eyes, blink, mouths, and 5 drops frames");
             }
         }
 
