@@ -68,7 +68,7 @@ namespace SlimeHelper
             catch { return true; }
         }
 
-        // 1. Scanner för relevanta anteckningar baserat på användarens fråga
+        // 1. Ranked scanner for relevant notes based on the user's query
         public static List<string> SearchVaultContent(string vaultPath, string query, int maxResults = 3)
         {
             var results = new List<string>();
@@ -77,13 +77,16 @@ namespace SlimeHelper
 
             try
             {
-                // Plocka ut relevanta sökord (hoppa över vanliga korta ord)
-                var keywords = query.Split(new[] { ' ', '?', '!', ',', '.' }, StringSplitOptions.RemoveEmptyEntries)
+                // Extract relevant keywords (> 3 characters)
+                var keywords = query.Split(new[] { ' ', '?', '!', ',', '.', ';', ':', '(', ')', '"', '\'' }, StringSplitOptions.RemoveEmptyEntries)
                                     .Where(w => w.Length > 3)
-                                    .Select(w => w.ToLower())
+                                    .Select(w => w.ToLowerInvariant())
+                                    .Distinct()
                                     .ToList();
 
                 if (keywords.Count == 0) return results;
+
+                var scoredMatches = new List<(string Formatted, int Score, string FileName)>();
 
                 foreach (var file in EnumerateMarkdownFiles(vaultPath))
                 {
@@ -91,21 +94,41 @@ namespace SlimeHelper
                         continue;
 
                     string fileName = Path.GetFileNameWithoutExtension(file);
+                    string fileNameLower = fileName.ToLowerInvariant();
                     string text = File.ReadAllText(file);
+                    string textLower = text.ToLowerInvariant();
 
-                    // Kolla om filnamnet eller innehållet matchar något sökord
-                    bool match = keywords.Any(k => fileName.ToLower().Contains(k) || text.ToLower().Contains(k));
-
-                    if (match)
+                    int score = 0;
+                    foreach (var k in keywords)
                     {
-                        // Hämta ett utdrag runt träffen eller början av filen
-                        string snippet = ExtractSnippet(text, keywords);
-                        results.Add($"[Note: {fileName}] -> {snippet}");
+                        if (string.Equals(fileNameLower, k, StringComparison.OrdinalIgnoreCase))
+                        {
+                            score += 8;
+                        }
+                        else if (fileNameLower.Contains(k))
+                        {
+                            score += 5;
+                        }
 
-                        if (results.Count >= maxResults)
-                            break;
+                        if (textLower.Contains(k))
+                        {
+                            score += 2;
+                        }
+                    }
+
+                    if (score > 0)
+                    {
+                        string snippet = ExtractSnippet(text, keywords);
+                        scoredMatches.Add(($"[Note: {fileName}] -> {snippet}", score, fileName));
                     }
                 }
+
+                results = scoredMatches
+                    .OrderByDescending(m => m.Score)
+                    .ThenBy(m => m.FileName, StringComparer.OrdinalIgnoreCase)
+                    .Take(Math.Max(1, maxResults))
+                    .Select(m => m.Formatted)
+                    .ToList();
             }
             catch (Exception ex)
             {

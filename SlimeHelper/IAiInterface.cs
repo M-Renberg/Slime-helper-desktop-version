@@ -76,11 +76,19 @@ namespace SlimeHelper
     {
         public static readonly JsonSerializerOptions JsonIndentOptions = new() { WriteIndented = true };
 
+        public static readonly HttpClient SharedHttpClient = new(new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(15)
+        })
+        {
+            Timeout = TimeSpan.FromSeconds(120)
+        };
+
         public static string ResolveMemoryPath()
         {
             try
             {
-                string settingsPath = Path.Combine(Path.GetTempPath(), "slime_settings.json");
+                string settingsPath = SlimeSettings.ResolveSettingsPath();
                 if (File.Exists(settingsPath))
                 {
                     var jsonDoc = JsonDocument.Parse(File.ReadAllText(settingsPath));
@@ -145,6 +153,7 @@ namespace SlimeHelper
 
     public class GeminiProvider : IAiProvider
     {
+        public const string DefaultModel = "gemini-3.8-flash";
         private static SlimeMemory _memory = new();
 
         public GeminiProvider()
@@ -168,8 +177,8 @@ namespace SlimeHelper
                 return $"I'll keep that in my slime-core: '{fact}' ✨";
             }
 
-            using var client = new HttpClient();
-            var url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={apiKey}";
+            var client = AiMemoryStorage.SharedHttpClient;
+            var url = $"https://generativelanguage.googleapis.com/v1beta/models/{DefaultModel}:generateContent?key={apiKey}";
 
             string factsString = _memory.Facts.Count > 0 ? string.Join(", ", _memory.Facts.TakeLast(10)) : "";
             string dynamicInstruction = $"You are a sassy anime slime assistant. User: {_memory.UserName}. " +
@@ -488,11 +497,11 @@ namespace SlimeHelper
                 : $"{systemInstruction}\n\n{memoryPrefix}";
 
             string bodyJson = BuildRequestJson(fullSystem, turns, tools);
-            using var client = new HttpClient();
+            var client = AiMemoryStorage.SharedHttpClient;
             bool useStream = onTextDelta != null;
             string endpoint = useStream
-                ? $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:streamGenerateContent?alt=sse&key={apiKey}"
-                : $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={apiKey}";
+                ? $"https://generativelanguage.googleapis.com/v1beta/models/{DefaultModel}:streamGenerateContent?alt=sse&key={apiKey}"
+                : $"https://generativelanguage.googleapis.com/v1beta/models/{DefaultModel}:generateContent?key={apiKey}";
 
             try
             {
@@ -544,6 +553,7 @@ namespace SlimeHelper
     // Claude Provider
     public class ClaudeProvider : IAiProvider
     {
+        public const string DefaultModel = "claude-5-5-sonnet";
         private static SlimeMemory _memory = new();
 
         public ClaudeProvider()
@@ -567,7 +577,7 @@ namespace SlimeHelper
                 return $"I'll keep that in my slime-core: '{fact}' ✨";
             }
 
-            using var client = new HttpClient();
+            var client = AiMemoryStorage.SharedHttpClient;
             var url = "https://api.anthropic.com/v1/messages";
 
             string factsString = _memory.Facts.Count > 0 ? string.Join(", ", _memory.Facts.TakeLast(10)) : "";
@@ -575,12 +585,9 @@ namespace SlimeHelper
                                          $"Project: {_memory.CurrentProject}." +
                                          (!string.IsNullOrEmpty(factsString) ? $" Facts: {factsString}" : "");
 
-            client.DefaultRequestHeaders.Add("x-api-key", apiKey);
-            client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
-
             var requestBody = new
             {
-                model = "claude-3-5-sonnet-20240620",
+                model = DefaultModel,
                 max_tokens = 4096,
                 system = dynamicInstruction,
                 messages = new[]
@@ -589,11 +596,16 @@ namespace SlimeHelper
                 }
             };
 
-            var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
-
             try
             {
-                var response = await client.PostAsync(url, content);
+                using var req = new HttpRequestMessage(HttpMethod.Post, url)
+                {
+                    Content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json")
+                };
+                req.Headers.Add("x-api-key", apiKey);
+                req.Headers.Add("anthropic-version", "2023-06-01");
+
+                using var response = await client.SendAsync(req);
                 var jsonResponse = await response.Content.ReadAsStringAsync();
 
                 using var doc = JsonDocument.Parse(jsonResponse);
@@ -632,7 +644,7 @@ namespace SlimeHelper
         {
             var root = new JsonObject
             {
-                ["model"] = "claude-3-5-sonnet-20240620",
+                ["model"] = DefaultModel,
                 ["max_tokens"] = 4096,
                 ["system"] = systemInstruction
             };
@@ -940,9 +952,7 @@ namespace SlimeHelper
             bool useStream = onTextDelta != null;
             string bodyJson = BuildRequestJson(fullSystem, turns, tools, stream: useStream);
 
-            using var client = new HttpClient();
-            client.DefaultRequestHeaders.Add("x-api-key", apiKey);
-            client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
+            var client = AiMemoryStorage.SharedHttpClient;
 
             try
             {
@@ -950,6 +960,8 @@ namespace SlimeHelper
                 {
                     Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
                 };
+                req.Headers.Add("x-api-key", apiKey);
+                req.Headers.Add("anthropic-version", "2023-06-01");
 
                 using var response = await client.SendAsync(
                     req,

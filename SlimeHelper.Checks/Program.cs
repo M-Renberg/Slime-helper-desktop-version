@@ -1408,6 +1408,48 @@ namespace SlimeHelper.Checks
 
             Check(compactCtx.Contains("Match the language the user writes in"),
                   "BuildLanguageRule supports Auto language mode so Slime can reply in Swedish or English");
+
+            // 8. Deep Analysis Fixes (P1: Settings migration, P2: CodeWatcher segment check, P3: Ranked Vault & 1-hop Memory search)
+            string p1Dir = Path.Combine(work, "SettingsMigration_" + Id());
+            Directory.CreateDirectory(p1Dir);
+            string primarySettings = Path.Combine(p1Dir, "AppData", "SlimeHelper", "slime_settings.json");
+            string legacySettings = Path.Combine(p1Dir, "Temp", "slime_settings.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(legacySettings)!);
+            File.WriteAllText(legacySettings, "{\"CurrentSkin\":\"Pink\",\"ResponseLanguage\":\"Swedish\"}");
+
+            var migratedSettings = SlimeSettings.Load(primarySettings, legacySettings);
+            Check(migratedSettings.CurrentSkin == "Pink" && migratedSettings.ResponseLanguage == "Swedish" && File.Exists(primarySettings),
+                  "SlimeSettings.Load automatically migrates legacy %TEMP% settings to LocalAppData primary path");
+
+            Check(CodeWatcherService.IsIgnoredPath(@"C:\repo\bin\Debug\App.dll")
+                  && CodeWatcherService.IsIgnoredPath(@"C:\repo\obj\project.assets.json")
+                  && CodeWatcherService.IsIgnoredPath(@"C:\repo\.git\config")
+                  && !CodeWatcherService.IsIgnoredPath(@"C:\repo\src\KeyBinding.cs")
+                  && !CodeWatcherService.IsIgnoredPath(@"C:\repo\src\BinarySearch.cs")
+                  && !CodeWatcherService.IsIgnoredPath(@"C:\repo\src\GameObject.cs"),
+                  "CodeWatcherService.IsIgnoredPath matches directory segments without falsely ignoring KeyBinding.cs or GameObject.cs");
+
+            string rankVault = Path.Combine(work, "RankVault_" + Id());
+            Directory.CreateDirectory(rankVault);
+            File.WriteAllText(Path.Combine(rankVault, "A_weak.md"), "Mentions authentication once in passing.");
+            File.WriteAllText(Path.Combine(rankVault, "B_weak.md"), "Also mentions authentication somewhere.");
+            File.WriteAllText(Path.Combine(rankVault, "C_weak.md"), "Another brief authentication mention.");
+            File.WriteAllText(Path.Combine(rankVault, "Authentication_Design.md"), "Complete authentication and token refresh specification.");
+            var rankedNotes = ObsidianService.SearchVaultContent(rankVault, "authentication token refresh", 2);
+            Check(rankedNotes.Count == 2 && rankedNotes[0].Contains("[Note: Authentication_Design]"),
+                  "ObsidianService.SearchVaultContent ranks title and multi-keyword matches above earlier single-keyword files",
+                  string.Join(" | ", rankedNotes));
+
+            var graphMem = new SlimeMemory();
+            graphMem.AddOrUpdateNode(new MemoryNode { Key = "auth_flow", Content = "JWT bearer tokens are used for API login", Category = MemoryCategory.Architecture });
+            graphMem.AddOrUpdateNode(new MemoryNode { Key = "token_expiry", Content = "Refresh window is 15 minutes", Category = MemoryCategory.Rule });
+            graphMem.ConnectNodes("auth_flow", "token_expiry", "depends_on");
+            var graphSearch = graphMem.SearchNodes("JWT bearer login", limit: 5);
+            Check(graphSearch.Count == 2 && graphSearch[0].Key == "auth_flow" && graphSearch[1].Key == "token_expiry",
+                  "SlimeMemory.SearchNodes includes 1-hop connected neighbor nodes in ranked search results");
+
+            Check(GeminiProvider.DefaultModel == "gemini-3.8-flash" && ClaudeProvider.DefaultModel == "claude-5-5-sonnet" && claudeReq.Contains("\"model\":\"claude-5-5-sonnet\""),
+                  "GeminiProvider and ClaudeProvider default to gemini-3.8-flash and claude-5-5-sonnet");
         }
 
         static string? FindRepoRoot()

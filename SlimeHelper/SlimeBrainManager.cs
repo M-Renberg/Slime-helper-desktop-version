@@ -44,7 +44,7 @@ namespace SlimeHelper
             string obsidianPath = "";
             if (_brainRootOverride == null)
             {
-                string settingsPath = Path.Combine(Path.GetTempPath(), "slime_settings.json");
+                string settingsPath = SlimeSettings.ResolveSettingsPath();
                 try
                 {
                     if (File.Exists(settingsPath))

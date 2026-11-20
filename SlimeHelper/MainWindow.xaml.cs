@@ -32,7 +32,7 @@ namespace SlimeHelper
         private readonly MediaPlayer mediaPlayer = new();
         private Point startWindowPos;
         private string currentSkin = "Default";
-        private readonly string settingsPath = Path.Combine(Path.GetTempPath(), "slime_settings.json");
+        private string settingsPath => SlimeSettings.ResolveSettingsPath();
 
         private readonly ActivityWatcher _activityWatcher = new();
         private readonly CodeWatcherService _codeWatcher = new();
@@ -2793,29 +2793,12 @@ namespace SlimeHelper
         //LOAD AND SAVE FUNCTIONS
         public void SaveFullSettings(SlimeSettings settings)
         {
-            try
-            {
-                string json = JsonSerializer.Serialize(settings, JsonOptions);
-                File.WriteAllText(settingsPath, json);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"Could not save settings: {ex.Message}");
-            }
+            SlimeSettings.Save(settings);
         }
 
         public SlimeSettings LoadFullSettings()
         {
-            try
-            {
-                if (File.Exists(settingsPath))
-                {
-                    string json = File.ReadAllText(settingsPath);
-                    return JsonSerializer.Deserialize<SlimeSettings>(json) ?? new SlimeSettings();
-                }
-            }
-            catch { }
-            return new SlimeSettings();
+            return SlimeSettings.Load();
         }
 
 

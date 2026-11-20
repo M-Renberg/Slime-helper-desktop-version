@@ -5,7 +5,20 @@ namespace SlimeCli
 {
     internal class Program
     {
-        private static readonly string SettingsPath = Path.Combine(Path.GetTempPath(), "slime_settings.json");
+        private static string SettingsPath
+        {
+            get
+            {
+                string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (!string.IsNullOrWhiteSpace(localAppData))
+                {
+                    string primary = Path.Combine(localAppData, "SlimeHelper", "slime_settings.json");
+                    if (File.Exists(primary)) return primary;
+                }
+                return Path.Combine(Path.GetTempPath(), "slime_settings.json");
+            }
+        }
+
         private static readonly string CommandFilePath = Path.Combine(Path.GetTempPath(), "slime_command.json");
 
         static async Task Main(string[] args)
@@ -336,7 +349,30 @@ namespace SlimeCli
             string noteFile = "slime_notes.md";
             string entry = $"- [ ] {task}\n";
 
-            File.AppendAllText(noteFile, entry);
+            if (!File.Exists(noteFile))
+            {
+                File.WriteAllText(noteFile, $"# Slime Notes & TODOs\n\n{entry}");
+            }
+            else
+            {
+                File.AppendAllText(noteFile, entry);
+            }
+
+            string gitignorePath = ".gitignore";
+            if (File.Exists(gitignorePath))
+            {
+                try
+                {
+                    string content = File.ReadAllText(gitignorePath);
+                    if (!content.Contains(noteFile, StringComparison.OrdinalIgnoreCase))
+                    {
+                        string suffix = content.EndsWith("\n") ? "" : "\n";
+                        File.AppendAllText(gitignorePath, $"{suffix}# Slime Helper Notes\n{noteFile}\n");
+                    }
+                }
+                catch { }
+            }
+
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine($"✔ Added task to {noteFile}: \"{task}\"");
             Console.ResetColor();
@@ -567,7 +603,7 @@ namespace SlimeCli
 
                     var body = new
                     {
-                        model = "claude-3-5-sonnet-20240620",
+                        model = "claude-5-5-sonnet",
                         max_tokens = 4096,
                         messages = new[]
                         {
@@ -596,7 +632,7 @@ namespace SlimeCli
                 }
                 else
                 {
-                    string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}";
+                    string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={key}";
                     var body = new { contents = new[] { new { parts = new[] { new { text = prompt } } } } };
                     var response = await client.PostAsync(url, new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
 

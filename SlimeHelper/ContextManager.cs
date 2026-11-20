@@ -1,11 +1,14 @@
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace SlimeHelper
 {
     public class SlimeSettings
     {
+        private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+
         public string CurrentSkin { get; set; } = "Default";
         public string SelectedProvider { get; set; } = "Gemini";
         public string GeminiKey { get; set; } = "";
@@ -16,6 +19,90 @@ namespace SlimeHelper
         public string ResponseLanguage { get; set; } = "Auto";
         public bool AutoStartWithWindows { get; set; } = false;
         public bool AllowDesktopRoaming { get; set; } = true;
+
+        public static string GetPrimarySettingsPath()
+        {
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(localAppData))
+            {
+                localAppData = Path.GetTempPath();
+            }
+            return Path.Combine(localAppData, "SlimeHelper", "slime_settings.json");
+        }
+
+        public static string GetLegacyTempSettingsPath() =>
+            Path.Combine(Path.GetTempPath(), "slime_settings.json");
+
+        /// <summary>
+        /// Resolves the active settings file path, automatically migrating from %TEMP%\slime_settings.json
+        /// to %LOCALAPPDATA%\SlimeHelper\slime_settings.json if only the legacy temp file exists.
+        /// </summary>
+        public static string ResolveSettingsPath(string? primaryOverride = null, string? legacyOverride = null)
+        {
+            string primary = primaryOverride ?? GetPrimarySettingsPath();
+            string legacy = legacyOverride ?? GetLegacyTempSettingsPath();
+
+            if (File.Exists(primary))
+            {
+                return primary;
+            }
+
+            if (File.Exists(legacy))
+            {
+                try
+                {
+                    string? dir = Path.GetDirectoryName(primary);
+                    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                    File.Copy(legacy, primary, overwrite: true);
+                    return primary;
+                }
+                catch
+                {
+                    return legacy;
+                }
+            }
+
+            return primary;
+        }
+
+        public static SlimeSettings Load(string? primaryOverride = null, string? legacyOverride = null)
+        {
+            try
+            {
+                string path = ResolveSettingsPath(primaryOverride, legacyOverride);
+                if (File.Exists(path))
+                {
+                    string json = File.ReadAllText(path);
+                    return JsonSerializer.Deserialize<SlimeSettings>(json) ?? new SlimeSettings();
+                }
+            }
+            catch { }
+            return new SlimeSettings();
+        }
+
+        public static void Save(SlimeSettings settings, string? primaryOverride = null, string? legacyOverride = null)
+        {
+            string primary = primaryOverride ?? GetPrimarySettingsPath();
+            string legacy = legacyOverride ?? GetLegacyTempSettingsPath();
+            string json = JsonSerializer.Serialize(settings, JsonOptions);
+
+            try
+            {
+                string? dir = Path.GetDirectoryName(primary);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(primary, json);
+            }
+            catch { }
+
+            try
+            {
+                if (!string.Equals(primary, legacy, StringComparison.OrdinalIgnoreCase))
+                {
+                    File.WriteAllText(legacy, json);
+                }
+            }
+            catch { }
+        }
     }
 
     public static class ContextManager

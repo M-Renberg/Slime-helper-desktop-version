@@ -304,6 +304,28 @@ namespace SlimeHelper
                 scored.Add((node, score));
             }
 
+            // Boost 1-hop connected neighbors of high-scoring matched nodes so related context surfaces naturally
+            var directKeys = new HashSet<string>(scored.Select(s => NormalizeKey(s.Node.Key)), StringComparer.OrdinalIgnoreCase);
+            var neighborAdditions = new List<(MemoryNode Node, int Score)>();
+
+            foreach (var (matchedNode, matchedScore) in scored.ToList())
+            {
+                foreach (var rel in matchedNode.Relations)
+                {
+                    string tgtKey = NormalizeKey(rel.TargetKey);
+                    if (directKeys.Contains(tgtKey)) continue;
+
+                    var targetNode = Nodes.FirstOrDefault(n => NormalizeKey(n.Key) == tgtKey);
+                    if (targetNode != null)
+                    {
+                        directKeys.Add(tgtKey);
+                        neighborAdditions.Add((targetNode, Math.Max(1, matchedScore / 2)));
+                    }
+                }
+            }
+
+            scored.AddRange(neighborAdditions);
+
             return scored.OrderByDescending(s => s.Score)
                          .Select(s => s.Node)
                          .Take(limit)

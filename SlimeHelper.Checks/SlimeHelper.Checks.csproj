@@ -24,6 +24,7 @@
     <Compile Include="..\SlimeHelper\AiService.cs" Link="App\AiService.cs" />
     <Compile Include="..\SlimeHelper\ContextManager.cs" Link="App\ContextManager.cs" />
     <Compile Include="..\SlimeHelper\RepoScannerService.cs" Link="App\RepoScannerService.cs" />
+    <Compile Include="..\SlimeHelper\CodeWatcherService.cs" Link="App\CodeWatcherService.cs" />
   </ItemGroup>
 
 </Project>

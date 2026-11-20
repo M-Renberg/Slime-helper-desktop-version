@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 
 namespace SlimeHelper
 {
@@ -78,10 +78,20 @@ namespace SlimeHelper
             catch { }
         }
 
-        private static bool IsIgnoredPath(string path)
+        private static readonly HashSet<string> IgnoredDirectorySegments = new(StringComparer.OrdinalIgnoreCase)
         {
-            return path.Contains(".git") || path.Contains(".vs") || path.Contains("bin") ||
-                   path.Contains("obj") || path.Contains("node_modules") || path.Contains(".obsidian");
+            ".git", ".vs", "bin", "obj", "node_modules", ".obsidian"
+        };
+
+        /// <summary>
+        /// Checks whether any directory segment in the path is an ignored build/tooling folder.
+        /// Matches exact path segments so source files like KeyBinding.cs or GameObject.cs are never ignored.
+        /// </summary>
+        public static bool IsIgnoredPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return true;
+            var segments = path.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar, '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+            return segments.Any(seg => IgnoredDirectorySegments.Contains(seg));
         }
 
         public void Dispose()

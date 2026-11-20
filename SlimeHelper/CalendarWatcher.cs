@@ -15,11 +15,24 @@ namespace SlimeHelper
         /// <summary>Tar med helgdags- och födelsedagskalendrar (av som standard, annars tar de lätt över "nästa händelse").</summary>
         public bool IncludeHolidaysAndBirthdays { get; set; } = false;
 
+        /// <summary>
+        /// Resolves credentials.json next to the executable (AppContext.BaseDirectory) first so Windows
+        /// autostart (where CWD is C:\Windows\System32) still finds it, falling back to current directory.
+        /// </summary>
+        public static string ResolveCredentialsPath()
+        {
+            string baseDirCred = Path.Combine(AppContext.BaseDirectory, "credentials.json");
+            if (File.Exists(baseDirCred)) return baseDirCred;
+            return Path.GetFullPath("credentials.json");
+        }
+
+        public static bool HasCredentialsFile() => File.Exists(ResolveCredentialsPath());
+
         // Samma inloggning som förut (credentials.json + token.json), men på ett ställe
         private static async Task<CalendarService> CreateServiceAsync()
         {
             UserCredential credential;
-            string credPath = "credentials.json";
+            string credPath = ResolveCredentialsPath();
 
             using (var stream = new FileStream(credPath, FileMode.Open, FileAccess.Read))
             {
@@ -74,7 +87,7 @@ namespace SlimeHelper
 
         public async Task<string?> GetUpcomingEventsSummaryAsync(int days = 14, int maxEvents = 15)
         {
-            if (!File.Exists("credentials.json")) return null;
+            if (!HasCredentialsFile()) return null;
 
             try
             {
@@ -230,7 +243,7 @@ namespace SlimeHelper
             if (string.IsNullOrWhiteSpace(title))
                 return (false, "Event title cannot be empty.");
 
-            if (!File.Exists("credentials.json"))
+            if (!HasCredentialsFile())
                 return (false, "Google Calendar credentials.json not found.");
 
             try
@@ -265,7 +278,7 @@ namespace SlimeHelper
                 (string summary, DateTime startTime) = ParseEventInput(input);
 
                 UserCredential credential;
-                string credPath = "credentials.json";
+                string credPath = ResolveCredentialsPath();
 
                 using (var stream = new FileStream(credPath, FileMode.Open, FileAccess.Read))
                 {

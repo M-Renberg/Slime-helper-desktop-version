@@ -49,8 +49,14 @@ namespace SlimeHelper
         public ActivityWatcher()
         {
             _instance = this;
-            _proc = HookCallback;
-            _hookID = SetHook(_proc);
+            GlobalWordWatcher.OnGlobalKeyActivity += NotifyKeyboardActivity;
+
+            // Only install a fallback OS hook if GlobalWordWatcher's shared hook is not active
+            if (!GlobalWordWatcher.IsHookActive)
+            {
+                _proc = HookCallback;
+                _hookID = SetHook(_proc);
+            }
 
             _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
             _timer.Tick += CheckActivity;
@@ -98,12 +104,12 @@ namespace SlimeHelper
                 OnReaction?.Invoke("IDLE", "Oh, you're back!");
             }
 
-            // Git check every 5 minutes
+            // Git check every 5 minutes (run asynchronously on a background thread so UI never stalls)
             _gitCheckCounter++;
             if (_gitCheckCounter >= 10)
             {
                 _gitCheckCounter = 0;
-                CheckGitStatus();
+                _ = Task.Run(CheckGitStatusAsync);
             }
 
             if ((DateTime.Now - _workStartTime).TotalMinutes >= 55)
@@ -274,50 +280,65 @@ namespace SlimeHelper
             return FindGitRootUpwards(Directory.GetCurrentDirectory());
         }
 
-        private void CheckGitStatus()
+        private async Task CheckGitStatusAsync()
         {
             try
             {
                 string? repoPath = ResolveGitRepoPath(ActiveRepoPath);
                 if (string.IsNullOrWhiteSpace(repoPath)) return;
 
+                string statusOutput = await RunGitBoundedAsync(repoPath, "status --porcelain");
+                if (!string.IsNullOrWhiteSpace(statusOutput))
+                {
+                    _ = _timer.Dispatcher.InvokeAsync(() =>
+                        OnReaction?.Invoke("DIRTY", SlimeResponses.PickRandom(SlimeResponses.UncommittedResponses)));
+                    return;
+                }
+
+                string pushOutput = await RunGitBoundedAsync(repoPath, "log @{u}..HEAD --oneline");
+                if (!string.IsNullOrWhiteSpace(pushOutput))
+                {
+                    _ = _timer.Dispatcher.InvokeAsync(() =>
+                        OnReaction?.Invoke("PUSH", SlimeResponses.PickRandom(SlimeResponses.UnpushedResponses)));
+                }
+            }
+            catch { }
+        }
+
+        private static async Task<string> RunGitBoundedAsync(string workingDir, string arguments)
+        {
+            try
+            {
                 var psi = new ProcessStartInfo
                 {
                     FileName = "git",
-                    Arguments = "status --porcelain",
-                    WorkingDirectory = repoPath,
+                    Arguments = arguments,
+                    WorkingDirectory = workingDir,
                     RedirectStandardOutput = true,
+                    RedirectStandardError = true,
                     UseShellExecute = false,
                     CreateNoWindow = true
                 };
 
                 using var process = Process.Start(psi);
-                if (process != null)
-                {
-                    string output = process.StandardOutput.ReadToEnd();
-                    process.WaitForExit();
+                if (process == null) return string.Empty;
 
-                    if (!string.IsNullOrWhiteSpace(output))
-                    {
-                        OnReaction?.Invoke("DIRTY", SlimeResponses.PickRandom(SlimeResponses.UncommittedResponses));
-                        return;
-                    }
+                var stdoutTask = process.StandardOutput.ReadToEndAsync();
+                var stderrTask = process.StandardError.ReadToEndAsync();
+
+                if (!process.WaitForExit(4000))
+                {
+                    try { process.Kill(true); } catch { }
+                    return string.Empty;
                 }
 
-                psi.Arguments = "log @{u}..HEAD --oneline";
-                using var pushProcess = Process.Start(psi);
-                if (pushProcess != null)
-                {
-                    string pushOutput = pushProcess.StandardOutput.ReadToEnd();
-                    pushProcess.WaitForExit();
-
-                    if (!string.IsNullOrWhiteSpace(pushOutput))
-                    {
-                        OnReaction?.Invoke("PUSH", SlimeResponses.PickRandom(SlimeResponses.UnpushedResponses));
-                    }
-                }
+                await Task.WhenAll(stdoutTask, stderrTask);
+                return process.ExitCode == 0 ? stdoutTask.Result.Trim() : string.Empty;
             }
-            catch { }
+            catch
+            {
+                return string.Empty;
+            }
         }
 
         private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -331,18 +352,22 @@ namespace SlimeHelper
             }
         }
 
+        private static void NotifyKeyboardActivity()
+        {
+            _lastKeyboardActivity = DateTime.Now;
+            var inst = _instance;
+            if (inst != null && inst._isCurrentlyAfk)
+            {
+                inst._isCurrentlyAfk = false;
+                _ = inst._timer.Dispatcher.InvokeAsync(() => inst.OnReaction?.Invoke("IDLE", "Oh, you're back!"));
+            }
+        }
+
         private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
             if (nCode >= 0)
             {
-                // Om hon sov tidigare och vi nu trycker på en tangent -> väck henne direkt!
-                if (_instance != null && _instance._isCurrentlyAfk)
-                {
-                    _instance._isCurrentlyAfk = false;
-                    _instance.OnReaction?.Invoke("IDLE", "Oh, you're back!");
-                }
-
-                _lastKeyboardActivity = DateTime.Now;
+                NotifyKeyboardActivity();
             }
             return CallNextHookEx(_hookID, nCode, wParam, lParam);
         }
@@ -359,6 +384,8 @@ namespace SlimeHelper
         {
             if (!_disposed)
             {
+                GlobalWordWatcher.OnGlobalKeyActivity -= NotifyKeyboardActivity;
+
                 if (disposing)
                 {
                     _timer?.Stop();

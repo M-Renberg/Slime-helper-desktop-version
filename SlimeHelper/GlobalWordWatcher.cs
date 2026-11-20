@@ -15,6 +15,13 @@ namespace SlimeHelper
 
         public event Action<string, string>? OnReaction;
 
+        /// <summary>
+        /// Fired on any global key press so ActivityWatcher can share a single WH_KEYBOARD_LL OS hook.
+        /// </summary>
+        public static event Action? OnGlobalKeyActivity;
+
+        public static bool IsHookActive => _hookID != IntPtr.Zero;
+
         public GlobalWordWatcher()
         {
             _proc = HookCallback;
@@ -34,14 +41,19 @@ namespace SlimeHelper
 
         private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
-            if (nCode >= 0 && wParam == (IntPtr)0x0100) // WM_KEYDOWN
+            if (nCode >= 0)
             {
-                int vkCode = Marshal.ReadInt32(lParam);
-                char keyChar = KeyCodeToChar(vkCode);
+                OnGlobalKeyActivity?.Invoke();
 
-                if (keyChar != '\0')
+                if (wParam == (IntPtr)0x0100) // WM_KEYDOWN
                 {
-                    Instance?.ProcessChar(keyChar);
+                    int vkCode = Marshal.ReadInt32(lParam);
+                    char keyChar = KeyCodeToChar(vkCode);
+
+                    if (keyChar != '\0')
+                    {
+                        Instance?.ProcessChar(keyChar);
+                    }
                 }
             }
             return CallNextHookEx(_hookID, nCode, wParam, lParam);
