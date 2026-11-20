@@ -18,6 +18,7 @@ namespace SlimeHelper
         public ObservableCollection<ChatUiMessage> Messages { get; } = new();
 
         public string CurrentThread { get; private set; } = "General";
+        private ChatUiMessage? _streamingMessage;
 
         private bool _isBusy;
         public bool IsBusy
@@ -50,6 +51,7 @@ namespace SlimeHelper
 
             // Subscribe to MainWindow AI pipeline events
             _mainWindow.AiStatusChanged += OnAiStatusChanged;
+            _mainWindow.AiStreamChunkReceived += OnAiStreamChunkReceived;
             _mainWindow.AiResponseReceived += OnAiResponseReceived;
             _mainWindow.AiErrorOccurred += OnAiErrorOccurred;
             _mainWindow.AiUserMessageReceived += OnAiUserMessageReceived;
@@ -215,6 +217,7 @@ namespace SlimeHelper
                     "• /todo done <number> — Mark task #<number> as '- [x]' completed\n" +
                     "• /focus <minutes> [task] — Start a Pomodoro focus timer (or /focus stop)\n" +
                     "• /mood [rest] — Show Slime's current Mood & Energy (or give her a coffee/rest boost)\n" +
+                    "• /lang [Auto|Swedish|English] — View or change Slime's reply language mode\n" +
                     "• /skin <color> — Change skin (Blue/Default, Green, Pink, Girl)\n" +
                     "• /cal <event> — Add event to Google Calendar (e.g. /cal Meeting tomorrow at 14)\n" +
                     "• /notes — Open Obsidian or workspace notes\n" +
@@ -229,8 +232,33 @@ namespace SlimeHelper
 
             if (lower == "/clear")
             {
+                _streamingMessage = null;
                 Messages.Clear();
                 AddSystemMessage("Chat view cleared. (History is safely kept in Slime's memory bank)");
+                return;
+            }
+
+            if (lower.StartsWith("/lang"))
+            {
+                var settings = _mainWindow.LoadFullSettings();
+                var parts = cmd.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length > 1)
+                {
+                    string mode = parts[1].Trim();
+                    string normalized = mode.ToLowerInvariant() switch
+                    {
+                        "sv" or "swe" or "swedish" or "svenska" => "Swedish",
+                        "en" or "eng" or "english" or "engelska" => "English",
+                        _ => "Auto"
+                    };
+                    settings.ResponseLanguage = normalized;
+                    _mainWindow.SaveFullSettings(settings);
+                    AddSystemMessage($"🌐 Reply language set to: {normalized}");
+                }
+                else
+                {
+                    AddSystemMessage($"🌐 Current reply language: {settings.ResponseLanguage} (Usage: /lang <Auto | Swedish | English>)");
+                }
                 return;
             }
 
@@ -812,8 +840,41 @@ namespace SlimeHelper
         {
             Dispatcher.Invoke(() =>
             {
+                if (_streamingMessage != null)
+                {
+                    Messages.Remove(_streamingMessage);
+                    _streamingMessage = null;
+                }
                 StatusTextBlock.Text = status;
                 StatusBanner.Visibility = Visibility.Visible;
+                ScrollToBottom();
+            });
+        }
+
+        private void OnAiStreamChunkReceived(string thread, string partialText)
+        {
+            if (string.IsNullOrWhiteSpace(partialText)) return;
+
+            Dispatcher.Invoke(() =>
+            {
+                if (!thread.Equals(CurrentThread, StringComparison.OrdinalIgnoreCase)) return;
+
+                if (_streamingMessage == null || !Messages.Contains(_streamingMessage))
+                {
+                    _streamingMessage = new ChatUiMessage
+                    {
+                        Sender = "Slime",
+                        Text = partialText,
+                        IsUser = false,
+                        Timestamp = DateTime.Now.ToString("HH:mm")
+                    };
+                    Messages.Add(_streamingMessage);
+                }
+                else
+                {
+                    _streamingMessage.Text = partialText;
+                }
+
                 ScrollToBottom();
             });
         }
@@ -827,15 +888,27 @@ namespace SlimeHelper
 
                 if (thread.Equals(CurrentThread, StringComparison.OrdinalIgnoreCase))
                 {
-                    Messages.Add(new ChatUiMessage
+                    if (_streamingMessage != null && Messages.Contains(_streamingMessage))
                     {
-                        Sender = "Slime",
-                        Text = response,
-                        IsUser = false,
-                        Timestamp = DateTime.Now.ToString("HH:mm")
-                    });
+                        _streamingMessage.Text = response;
+                        _streamingMessage = null;
+                    }
+                    else
+                    {
+                        Messages.Add(new ChatUiMessage
+                        {
+                            Sender = "Slime",
+                            Text = response,
+                            IsUser = false,
+                            Timestamp = DateTime.Now.ToString("HH:mm")
+                        });
+                    }
 
                     ScrollToBottom();
+                }
+                else
+                {
+                    _streamingMessage = null;
                 }
             });
         }
@@ -846,6 +919,12 @@ namespace SlimeHelper
             {
                 IsBusy = false;
                 StatusBanner.Visibility = Visibility.Collapsed;
+
+                if (_streamingMessage != null)
+                {
+                    Messages.Remove(_streamingMessage);
+                    _streamingMessage = null;
+                }
 
                 Messages.Add(new ChatUiMessage
                 {

@@ -20,6 +20,10 @@
     <Compile Include="..\SlimeHelper\NotesManager.cs" Link="App\NotesManager.cs" />
     <Compile Include="..\SlimeHelper\ObsidianService.cs" Link="App\ObsidianService.cs" />
     <Compile Include="..\SlimeHelper\PaperDollResolver.cs" Link="App\PaperDollResolver.cs" />
+    <Compile Include="..\SlimeHelper\IAiInterface.cs" Link="App\IAiInterface.cs" />
+    <Compile Include="..\SlimeHelper\AiService.cs" Link="App\AiService.cs" />
+    <Compile Include="..\SlimeHelper\ContextManager.cs" Link="App\ContextManager.cs" />
+    <Compile Include="..\SlimeHelper\RepoScannerService.cs" Link="App\RepoScannerService.cs" />
   </ItemGroup>
 
 </Project>

@@ -100,6 +100,11 @@ namespace SlimeHelper
             string? ParseError);
 
         private static readonly List<CalendarEventRequest> PendingCalendarEvents = new();
+        private static readonly List<int> PendingCalendarQueries = new();
+
+        public static string CurrentObsidianVaultPath { get; set; } = "";
+        public static string CurrentReposRootPath { get; set; } = "";
+        public static Func<int, string?>? CalendarSummaryProvider { get; set; }
 
         public static List<CalendarEventRequest> TakePendingCalendarEvents()
         {
@@ -107,6 +112,16 @@ namespace SlimeHelper
             {
                 var copy = PendingCalendarEvents.ToList();
                 PendingCalendarEvents.Clear();
+                return copy;
+            }
+        }
+
+        public static List<int> TakePendingCalendarQueries()
+        {
+            lock (PendingCalendarQueries)
+            {
+                var copy = PendingCalendarQueries.ToList();
+                PendingCalendarQueries.Clear();
                 return copy;
             }
         }
@@ -143,6 +158,7 @@ namespace SlimeHelper
             WriteFailureCount = 0;
             lock (Activity) { Activity.Clear(); }
             lock (PendingCalendarEvents) { PendingCalendarEvents.Clear(); }
+            lock (PendingCalendarQueries) { PendingCalendarQueries.Clear(); }
         }
 
         /// <summary>Antal misslyckade ändringar/skrivningar (används för att inte bygga kod som ändringen aldrig nådde).</summary>
@@ -401,6 +417,11 @@ namespace SlimeHelper
             sb.AppendLine("To add an event to the user's Google Calendar (only when asked to schedule/add an event):");
             sb.AppendLine("[ADD_CALENDAR: Event Title | yyyy-MM-dd HH:mm | 60]");
             sb.AppendLine("(Optional 3rd field is duration in minutes, default 60. Use exact yyyy-MM-dd HH:mm based on the current date above.)");
+            sb.AppendLine("To check upcoming Google Calendar events: [GET_CALENDAR: 14]");
+            sb.AppendLine("To view open To-Do items: [GET_TODOS]");
+            sb.AppendLine("To read today's Obsidian daily note: [GET_DAILY_NOTE]");
+            sb.AppendLine("To search Obsidian & SlimeBrain notes: [SEARCH_NOTES: query]");
+            sb.AppendLine("To check which repositories have uncommitted changes: [GET_DIRTY_REPOS]");
             return sb.ToString();
         }
 
@@ -431,6 +452,11 @@ namespace SlimeHelper
             sb.AppendLine("To remove an outdated memory: [FORGET_MEMORY: key]");
             sb.AppendLine($"To add a Google Calendar event (current local date/time: {DateTime.Now:yyyy-MM-dd (dddd) HH:mm}):");
             sb.AppendLine("[ADD_CALENDAR: Event Title | yyyy-MM-dd HH:mm | 60]");
+            sb.AppendLine("To read upcoming Google Calendar events: [GET_CALENDAR: 14]");
+            sb.AppendLine("To fetch open To-Do items on demand: [GET_TODOS]");
+            sb.AppendLine("To read today's Obsidian daily note on demand: [GET_DAILY_NOTE]");
+            sb.AppendLine("To search Obsidian & SlimeBrain notes on demand: [SEARCH_NOTES: query]");
+            sb.AppendLine("To check which repositories have uncommitted changes: [GET_DIRTY_REPOS]");
 
             if (!string.IsNullOrEmpty(targetRepoPath))
             {
@@ -486,9 +512,14 @@ namespace SlimeHelper
                 sb.AppendLine("[RUN_CHECK: lint]");
                 sb.AppendLine("If the repo has several projects, name one: [RUN_CHECK: build | relative/path/to/Project.sln-or-folder]. Supported: .NET (dotnet build / dotnet test) and Node (npm run build / npm test / npm run lint, only when the script exists). Nothing else can be run. The user may be asked to approve it, and you get the errors back to fix.");
 
+                sb.AppendLine($"\n9. READ-ONLY GIT INSPECTION ({targetRepoPath}):");
+                sb.AppendLine("To check branch and modified/untracked files: [GIT_STATUS]");
+                sb.AppendLine("To inspect uncommitted diffs (whole repo or one file): [GIT_DIFF] or [GIT_DIFF: relative_path/file.cs]");
+                sb.AppendLine("To inspect recent commit history: [GIT_LOG: 10]");
+
                 sb.AppendLine("\nCODING RULES:");
-                sb.AppendLine("- LANGUAGE: You must ALWAYS respond in English. Even if the user writes or prompts in Swedish or any other language, every reply, explanation, and message from you MUST be exclusively in English. Never answer in Swedish.");
-                sb.AppendLine("- When the user asks you to change, create or save something, your reply MUST contain the tool blocks that do it. Announcing it (\"Adding X to Y...\", \"Creating a folder...\") without a tool block does NOTHING - the application only acts on tool blocks.");
+                sb.AppendLine("- LANGUAGE: Follow the [Language Rule] in the system context (match the user's language in Auto mode, or use the configured language), and never use emojis in what you say.");
+                sb.AppendLine("- When the user asks you to change, create or save something, your reply MUST contain the tool blocks (or native tool calls) that do it. Announcing it (\"Adding X to Y...\", \"Creating a folder...\") without a tool block does NOTHING - the application only acts on tool blocks.");
                 sb.AppendLine("- You MUST read a file with READ_FILE before you edit or overwrite it (use a line range for big files). Edits to files you have not read are rejected. Never guess what a file contains.");
                 sb.AppendLine("- FIND must match the file EXACTLY (characters and indentation) and must be unique in the file, so include enough surrounding lines. Never put line numbers or ``` fences inside FIND or REPLACE.");
                 sb.AppendLine("- Keep edits small and focused. Do not rewrite whole files, and follow the existing code style and indentation.");
@@ -644,6 +675,127 @@ namespace SlimeHelper
                 return $"\n*(I couldn't forget memory '{key}': {msg} 🔒)*\n";
             }, RegexOptions.IgnoreCase);
 
+            // Google Calendar Read Tool: GET_CALENDAR
+            cleanResponse = Regex.Replace(cleanResponse, @"\[GET_CALENDAR(?::\s*([^\]]*))?\]", m =>
+            {
+                int days = 14;
+                if (m.Groups[1].Success && int.TryParse(m.Groups[1].Value.Trim(), out int parsedDays) && parsedDays > 0)
+                {
+                    days = Math.Clamp(parsedDays, 1, 60);
+                }
+
+                if (CalendarSummaryProvider != null)
+                {
+                    string? summary = CalendarSummaryProvider(days);
+                    localFollowUp += $"\n[UPCOMING CALENDAR EVENTS (Next {days} days)]\n{(string.IsNullOrWhiteSpace(summary) ? "No upcoming events found." : summary)}\n";
+                }
+                else
+                {
+                    lock (PendingCalendarQueries) { PendingCalendarQueries.Add(days); }
+                }
+
+                return $"\n*(I'm looking at your calendar for the next {days} days... 🔍)*\n";
+            }, RegexOptions.IgnoreCase);
+
+            // Dynamic Context Tool: GET_TODOS
+            cleanResponse = Regex.Replace(cleanResponse, @"\[GET_TODOS(?::\s*[^\]]*)?\]", _ =>
+            {
+                string[] folders = brainManager.GetTodoScanFolders(activeThread, CurrentObsidianVaultPath);
+                var items = NotesManager.ListUnfinishedTodos(folders);
+                if (items.Count == 0)
+                {
+                    localFollowUp += "\n[ACTIVE TO-DO TASKS]\nNo open '- [ ]' To-Do tasks found.\n";
+                }
+                else
+                {
+                    var sbTodos = new System.Text.StringBuilder();
+                    sbTodos.AppendLine($"\n[ACTIVE TO-DO TASKS ({items.Count} open)]");
+                    foreach (var item in items.Take(20))
+                    {
+                        sbTodos.AppendLine($"{item.Index}. [ ] {item.Text} ({Path.GetFileName(item.FilePath)})");
+                    }
+                    localFollowUp += sbTodos.ToString();
+                }
+                return "\n*(I'm looking at your To-Do list... 📝)*\n";
+            }, RegexOptions.IgnoreCase);
+
+            // Dynamic Context Tool: GET_DAILY_NOTE
+            cleanResponse = Regex.Replace(cleanResponse, @"\[GET_DAILY_NOTE(?::\s*[^\]]*)?\]", _ =>
+            {
+                string snippet = ObsidianService.GetDailyNoteSnippet(CurrentObsidianVaultPath, 2000);
+                if (string.IsNullOrWhiteSpace(snippet))
+                {
+                    localFollowUp += "\n[TODAY'S DAILY NOTE]\nNo daily note found for today.\n";
+                }
+                else
+                {
+                    localFollowUp += $"\n[TODAY'S DAILY NOTE]\n{snippet}\n";
+                }
+                return "\n*(I'm reading today's daily note... 📖)*\n";
+            }, RegexOptions.IgnoreCase);
+
+            // Dynamic Context Tool: SEARCH_NOTES
+            cleanResponse = Regex.Replace(cleanResponse, @"\[SEARCH_NOTES:\s*([^\]]+?)\]", m =>
+            {
+                string query = m.Groups[1].Value.Trim();
+                var matches = new List<string>();
+                if (!string.IsNullOrWhiteSpace(CurrentObsidianVaultPath) && Directory.Exists(CurrentObsidianVaultPath))
+                {
+                    matches.AddRange(ObsidianService.SearchVaultContent(CurrentObsidianVaultPath, query, 5));
+                }
+                string generalNotes = brainManager.GetGeneralNotesFolder();
+                if (Directory.Exists(generalNotes))
+                {
+                    foreach (var hit in ObsidianService.SearchVaultContent(generalNotes, query, 3))
+                    {
+                        if (!matches.Contains(hit)) matches.Add(hit);
+                    }
+                }
+                if (!activeThread.Equals("General", StringComparison.OrdinalIgnoreCase))
+                {
+                    string repoBrain = brainManager.GetRepoBrainPath(activeThread);
+                    if (!string.IsNullOrEmpty(repoBrain) && Directory.Exists(repoBrain))
+                    {
+                        foreach (var hit in ObsidianService.SearchVaultContent(repoBrain, query, 3))
+                        {
+                            if (!matches.Contains(hit)) matches.Add(hit);
+                        }
+                    }
+                }
+
+                if (matches.Count > 0)
+                {
+                    localFollowUp += $"\n[NOTE SEARCH RESULTS FOR \"{query}\"]\n" + string.Join("\n", matches) + "\n";
+                    return $"\n*(I searched your notes for '{query}' and found {matches.Count} matches! 🔍)*\n";
+                }
+
+                localFollowUp += $"\n[NOTE SEARCH RESULTS FOR \"{query}\"]\nNo matching notes found.\n";
+                return $"\n*(I searched your notes for '{query}' but found no matches 🔍)*\n";
+            }, RegexOptions.IgnoreCase);
+
+            // Dynamic Context Tool: GET_DIRTY_REPOS
+            cleanResponse = Regex.Replace(cleanResponse, @"\[GET_DIRTY_REPOS(?::\s*[^\]]*)?\]", _ =>
+            {
+                var dirty = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrWhiteSpace(CurrentReposRootPath) && Directory.Exists(CurrentReposRootPath))
+                {
+                    foreach (var d in RepoScannerService.ScanDirtyRepos(CurrentReposRootPath)) dirty.Add(d);
+                }
+                foreach (var kv in brainManager.GetBoundRepos())
+                {
+                    if (!string.IsNullOrWhiteSpace(kv.Value) && Directory.Exists(Path.Combine(kv.Value, ".git")))
+                    {
+                        string st = RunReadOnlyGit(kv.Value, "status --porcelain");
+                        if (!string.IsNullOrWhiteSpace(st)) dirty.Add($"{kv.Key} ({Path.GetFileName(kv.Value)})");
+                    }
+                }
+
+                localFollowUp += dirty.Count > 0
+                    ? $"\n[UNCOMMITTED REPOSITORIES]\n{string.Join(", ", dirty)}\n"
+                    : "\n[UNCOMMITTED REPOSITORIES]\nAll scanned repositories are clean.\n";
+                return "\n*(I'm looking at repository status... 📂)*\n";
+            }, RegexOptions.IgnoreCase);
+
             if (!string.IsNullOrEmpty(targetRepoPath))
             {
                 // Verktyg 2 (Skriva dokumentation)
@@ -683,6 +835,9 @@ namespace SlimeHelper
 
                 // Tool 4 (Read files) - runs before EDIT_FILE so reading and editing in the same response succeeds
                 cleanResponse = ProcessReadFiles(cleanResponse, targetRepoPath, activeThread, ref localFollowUp);
+
+                // Safe Read-Only Git Tools: GIT_STATUS, GIT_DIFF, GIT_LOG
+                cleanResponse = ProcessGitReadTools(cleanResponse, targetRepoPath, activeThread, ref localFollowUp);
 
                 // Tool 7 (Edit existing file with FIND/REPLACE)
                 cleanResponse = ProcessEditFiles(cleanResponse, targetRepoPath, activeThread, brainManager, ref localFollowUp);
@@ -2897,6 +3052,533 @@ namespace SlimeHelper
                 startIndex = result.IndexOf(startTag, startIndex + startTag.Length);
             }
             return result;
+        }
+
+        // --- Native Function Calling (Tool Declarations, Conversion & Execution) ---
+
+        private static readonly Regex StreamingTagStripRegex = new(
+            @"\[(?:SAVE_NOTE|REMEMBER|EDIT_FILE|WRITE_CODE|WRITE_DOC|CREATE_FILE):[\s\S]*?(?:\[/(?:SAVE_NOTE|REMEMBER|EDIT_FILE|WRITE_CODE|WRITE_DOC|CREATE_FILE)\]|$)|\[(?:CONNECT_MEMORY|RECALL_MEMORY|FORGET_MEMORY|ADD_CALENDAR|GET_CALENDAR|GET_TODOS|GET_DAILY_NOTE|SEARCH_NOTES|GET_DIRTY_REPOS|READ_FILE|LIST_FILES|SEARCH_FILES|RUN_CHECK|GIT_STATUS|GIT_DIFF|GIT_LOG)[^\]]*(?:\]|$)",
+            RegexOptions.IgnoreCase);
+
+        /// <summary>
+        /// Cleans partial or complete tool blocks and status lines from a live streaming text buffer
+        /// so that UI speech and chat bubbles only show Slime's natural spoken prose as it streams.
+        /// </summary>
+        public static string SanitizeStreamingPreview(string rawText)
+        {
+            if (string.IsNullOrWhiteSpace(rawText)) return "";
+            string cleaned = StripHallucinatedTurns(rawText);
+            cleaned = StreamingTagStripRegex.Replace(cleaned, "");
+            cleaned = RemoveStatusLines(cleaned);
+            return cleaned.Trim();
+        }
+
+        /// <summary>
+        /// Returns structured native tool declarations (for Gemini function_declarations and Claude tools)
+        /// appropriate for the active thread and bound repository.
+        /// </summary>
+        public static List<AiToolDefinition> GetNativeTools(string activeThread, string targetRepoPath)
+        {
+            var tools = new List<AiToolDefinition>
+            {
+                new(
+                    "remember",
+                    "Save a structured fact, user preference, project decision, or rule in SlimeBrain's memory network.",
+                    new Dictionary<string, AiToolParameter>
+                    {
+                        ["key"] = new("string", "Unique snake_case key (use 'user_name' for the user's name)."),
+                        ["category"] = new("string", "Memory category.", ["Fact", "UserPreference", "ProjectDecision", "Architecture", "Concept", "Rule"]),
+                        ["tags"] = new("string", "Comma-separated hashtags, e.g. '#csharp, #style'."),
+                        ["content"] = new("string", "The fact or rule content to store.")
+                    },
+                    ["key", "content"]),
+
+                new(
+                    "connect_memory",
+                    "Create a directed relation edge between two memory keys in SlimeBrain.",
+                    new Dictionary<string, AiToolParameter>
+                    {
+                        ["source_key"] = new("string", "Source memory key."),
+                        ["relation"] = new("string", "Relation type (e.g. relates_to, depends_on, part_of)."),
+                        ["target_key"] = new("string", "Target memory key.")
+                    },
+                    ["source_key", "relation", "target_key"]),
+
+                new(
+                    "recall_memory",
+                    "Search SlimeBrain's memory network by keyword or #tag.",
+                    new Dictionary<string, AiToolParameter>
+                    {
+                        ["query"] = new("string", "Search query or #tag.")
+                    },
+                    ["query"]),
+
+                new(
+                    "forget_memory",
+                    "Remove an outdated memory node from SlimeBrain by key.",
+                    new Dictionary<string, AiToolParameter>
+                    {
+                        ["key"] = new("string", "Memory key to remove.")
+                    },
+                    ["key"]),
+
+                new(
+                    "save_note",
+                    "Save a markdown note or To-Do list into SlimeBrain / Obsidian memory.",
+                    new Dictionary<string, AiToolParameter>
+                    {
+                        ["filename"] = new("string", "Relative markdown filename (e.g. 'notes/ideas.md')."),
+                        ["content"] = new("string", "Markdown content to save.")
+                    },
+                    ["filename", "content"]),
+
+                new(
+                    "add_calendar",
+                    "Schedule an event in the user's Google Calendar.",
+                    new Dictionary<string, AiToolParameter>
+                    {
+                        ["title"] = new("string", "Event title."),
+                        ["start_time"] = new("string", "Start date and time in exact 'yyyy-MM-dd HH:mm' format."),
+                        ["duration_minutes"] = new("string", "Duration in minutes (default '60')."),
+                        ["description"] = new("string", "Optional event description.")
+                    },
+                    ["title", "start_time"]),
+
+                new(
+                    "get_calendar_events",
+                    "Read upcoming events from the user's Google Calendar.",
+                    new Dictionary<string, AiToolParameter>
+                    {
+                        ["days"] = new("string", "Number of upcoming days to look ahead (1 to 60, default '14').")
+                    },
+                    []),
+
+                new(
+                    "get_todos",
+                    "Fetch all open '- [ ]' To-Do items across slime_notes.md and Obsidian.",
+                    new Dictionary<string, AiToolParameter>(),
+                    []),
+
+                new(
+                    "get_daily_note",
+                    "Read today's daily note from the connected Obsidian vault.",
+                    new Dictionary<string, AiToolParameter>(),
+                    []),
+
+                new(
+                    "search_notes",
+                    "Search Obsidian vault and SlimeBrain markdown notes by keyword.",
+                    new Dictionary<string, AiToolParameter>
+                    {
+                        ["query"] = new("string", "Keywords to search for in notes.")
+                    },
+                    ["query"]),
+
+                new(
+                    "get_dirty_repos",
+                    "Check which repositories have uncommitted Git changes.",
+                    new Dictionary<string, AiToolParameter>(),
+                    [])
+            };
+
+            if (!string.IsNullOrWhiteSpace(targetRepoPath))
+            {
+                tools.AddRange(
+                [
+                    new(
+                        "read_file",
+                        "Read an existing file from the bound workspace before editing or answering questions about it.",
+                        new Dictionary<string, AiToolParameter>
+                        {
+                            ["path"] = new("string", "Relative file path from workspace root."),
+                            ["line_range"] = new("string", "Optional 1-based line range 'start-end' (max 400 lines), e.g. '100-200'.")
+                        },
+                        ["path"]),
+
+                    new(
+                        "list_files",
+                        "List the directory and file structure of the workspace or a subfolder.",
+                        new Dictionary<string, AiToolParameter>
+                        {
+                            ["path"] = new("string", "Relative directory path (use '.' for workspace root).")
+                        },
+                        ["path"]),
+
+                    new(
+                        "search_files",
+                        "Search workspace file names and file contents for a text query.",
+                        new Dictionary<string, AiToolParameter>
+                        {
+                            ["query"] = new("string", "Text to search for across file names and contents.")
+                        },
+                        ["query"]),
+
+                    new(
+                        "edit_file",
+                        "Modify part of an existing workspace file using exact FIND and REPLACE blocks (file must be read with read_file first).",
+                        new Dictionary<string, AiToolParameter>
+                        {
+                            ["path"] = new("string", "Relative file path to edit."),
+                            ["find"] = new("string", "Exact existing lines copied from the file (must be unique)."),
+                            ["replace"] = new("string", "Replacement lines.")
+                        },
+                        ["path", "find", "replace"]),
+
+                    new(
+                        "write_code",
+                        "Create a new source code file or overwrite a small previously-read file in the workspace.",
+                        new Dictionary<string, AiToolParameter>
+                        {
+                            ["path"] = new("string", "Relative file path."),
+                            ["content"] = new("string", "Full source code content.")
+                        },
+                        ["path", "content"]),
+
+                    new(
+                        "write_doc",
+                        "Create or update a markdown documentation file in the workspace.",
+                        new Dictionary<string, AiToolParameter>
+                        {
+                            ["path"] = new("string", "Relative markdown file path."),
+                            ["content"] = new("string", "Full markdown content.")
+                        },
+                        ["path", "content"]),
+
+                    new(
+                        "run_check",
+                        "Compile, test, or lint the workspace project to verify changes.",
+                        new Dictionary<string, AiToolParameter>
+                        {
+                            ["kind"] = new("string", "Check type to run.", ["build", "test", "lint"]),
+                            ["target"] = new("string", "Optional relative path to specific project/solution/folder when the repo has multiple targets.")
+                        },
+                        ["kind"]),
+
+                    new(
+                        "git_status",
+                        "Run a read-only 'git status' in the bound workspace to inspect current branch and changed files.",
+                        new Dictionary<string, AiToolParameter>(),
+                        []),
+
+                    new(
+                        "git_diff",
+                        "Run a read-only 'git diff' in the bound workspace (optionally scoped to a specific relative file path).",
+                        new Dictionary<string, AiToolParameter>
+                        {
+                            ["path"] = new("string", "Optional relative file path to diff.")
+                        },
+                        []),
+
+                    new(
+                        "git_log",
+                        "Run a read-only 'git log' in the bound workspace to see recent commits.",
+                        new Dictionary<string, AiToolParameter>
+                        {
+                            ["count"] = new("string", "Number of recent commits to show (1 to 30, default '10').")
+                        },
+                        [])
+                ]);
+            }
+
+            return tools;
+        }
+
+        /// <summary>
+        /// Translates structured native tool calls (Gemini functionCall / Claude tool_use) into
+        /// canonical SlimeToolManager blocks so that all safety guards, read-before-edit checks,
+        /// C# class placement checks, brace balance validation, backups, and activity trails run through one pipeline.
+        /// </summary>
+        public static string ConvertNativeToolCallsToTags(IEnumerable<AiToolCall>? toolCalls)
+        {
+            if (toolCalls == null) return "";
+            var sb = new System.Text.StringBuilder();
+
+            static string Arg(AiToolCall call, params string[] keys)
+            {
+                foreach (var k in keys)
+                {
+                    if (call.Arguments.TryGetValue(k, out var val) && val != null)
+                        return val;
+                }
+                return "";
+            }
+
+            foreach (var call in toolCalls)
+            {
+                string name = (call.Name ?? "").Trim().ToLowerInvariant();
+                switch (name)
+                {
+                    case "save_note":
+                        sb.AppendLine($"[SAVE_NOTE: {Arg(call, "filename", "path")}]\n{Arg(call, "content")}\n[/SAVE_NOTE]");
+                        break;
+                    case "remember":
+                    {
+                        string key = Arg(call, "key");
+                        string cat = Arg(call, "category");
+                        if (string.IsNullOrWhiteSpace(cat)) cat = "Fact";
+                        string tags = Arg(call, "tags");
+                        string header = string.IsNullOrWhiteSpace(tags) ? $"{key} | {cat}" : $"{key} | {cat} | {tags}";
+                        sb.AppendLine($"[REMEMBER: {header}]\n{Arg(call, "content")}\n[/REMEMBER]");
+                        break;
+                    }
+                    case "connect_memory":
+                        sb.AppendLine($"[CONNECT_MEMORY: {Arg(call, "source_key", "from")} -> {Arg(call, "relation", "relation_type")} -> {Arg(call, "target_key", "to")}]");
+                        break;
+                    case "recall_memory":
+                        sb.AppendLine($"[RECALL_MEMORY: {Arg(call, "query")}]");
+                        break;
+                    case "forget_memory":
+                        sb.AppendLine($"[FORGET_MEMORY: {Arg(call, "key")}]");
+                        break;
+                    case "add_calendar":
+                    {
+                        string title = Arg(call, "title");
+                        string start = Arg(call, "start_time", "start");
+                        string dur = Arg(call, "duration_minutes", "duration");
+                        if (string.IsNullOrWhiteSpace(dur)) dur = "60";
+                        string desc = Arg(call, "description");
+                        if (string.IsNullOrWhiteSpace(desc))
+                            sb.AppendLine($"[ADD_CALENDAR: {title} | {start} | {dur}]");
+                        else
+                            sb.AppendLine($"[ADD_CALENDAR: {title} | {start} | {dur}]\n{desc}\n[/ADD_CALENDAR]");
+                        break;
+                    }
+                    case "get_calendar_events":
+                    case "get_calendar":
+                    {
+                        string days = Arg(call, "days");
+                        sb.AppendLine(string.IsNullOrWhiteSpace(days) ? "[GET_CALENDAR]" : $"[GET_CALENDAR: {days}]");
+                        break;
+                    }
+                    case "get_todos":
+                        sb.AppendLine("[GET_TODOS]");
+                        break;
+                    case "get_daily_note":
+                        sb.AppendLine("[GET_DAILY_NOTE]");
+                        break;
+                    case "search_notes":
+                        sb.AppendLine($"[SEARCH_NOTES: {Arg(call, "query")}]");
+                        break;
+                    case "get_dirty_repos":
+                        sb.AppendLine("[GET_DIRTY_REPOS]");
+                        break;
+                    case "read_file":
+                    {
+                        string path = Arg(call, "path", "filename");
+                        string range = Arg(call, "line_range", "range");
+                        sb.AppendLine(string.IsNullOrWhiteSpace(range) ? $"[READ_FILE: {path}]" : $"[READ_FILE: {path} | {range}]");
+                        break;
+                    }
+                    case "list_files":
+                    {
+                        string path = Arg(call, "path", "directory");
+                        if (string.IsNullOrWhiteSpace(path)) path = ".";
+                        sb.AppendLine($"[LIST_FILES: {path}]");
+                        break;
+                    }
+                    case "search_files":
+                        sb.AppendLine($"[SEARCH_FILES: {Arg(call, "query", "text")}]");
+                        break;
+                    case "edit_file":
+                        sb.AppendLine($"[EDIT_FILE: {Arg(call, "path", "filename")}]\n[FIND]\n{Arg(call, "find")}\n[/FIND]\n[REPLACE]\n{Arg(call, "replace")}\n[/REPLACE]\n[/EDIT_FILE]");
+                        break;
+                    case "write_code":
+                        sb.AppendLine($"[WRITE_CODE: {Arg(call, "path", "filename")}]\n{Arg(call, "content")}\n[/WRITE_CODE]");
+                        break;
+                    case "write_doc":
+                        sb.AppendLine($"[WRITE_DOC: {Arg(call, "path", "filename")}]\n{Arg(call, "content")}\n[/WRITE_DOC]");
+                        break;
+                    case "run_check":
+                    {
+                        string kind = Arg(call, "kind", "check");
+                        string target = Arg(call, "target");
+                        sb.AppendLine(string.IsNullOrWhiteSpace(target) ? $"[RUN_CHECK: {kind}]" : $"[RUN_CHECK: {kind} | {target}]");
+                        break;
+                    }
+                    case "git_status":
+                        sb.AppendLine("[GIT_STATUS]");
+                        break;
+                    case "git_diff":
+                    {
+                        string path = Arg(call, "path", "filename");
+                        sb.AppendLine(string.IsNullOrWhiteSpace(path) ? "[GIT_DIFF]" : $"[GIT_DIFF: {path}]");
+                        break;
+                    }
+                    case "git_log":
+                    {
+                        string count = Arg(call, "count");
+                        sb.AppendLine(string.IsNullOrWhiteSpace(count) ? "[GIT_LOG]" : $"[GIT_LOG: {count}]");
+                        break;
+                    }
+                }
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>
+        /// Processes an AiAgentResponse containing spoken text and/or native function calls,
+        /// executing all tools through ProcessResponse and producing structured AiToolResult items
+        /// for multi-turn functionResponse / tool_result feedback.
+        /// </summary>
+        public static string ProcessAgentResponse(
+            AiAgentResponse agentResponse,
+            string activeThread,
+            string targetRepoPath,
+            SlimeBrainManager brainManager,
+            out string followUpPrompt,
+            out List<CheckRequest> checks,
+            out List<AiToolResult> toolResults)
+        {
+            string baseText = StripHallucinatedTurns(agentResponse.Text ?? "");
+            string synthesizedTags = ConvertNativeToolCallsToTags(agentResponse.ToolCalls);
+            string combined = string.IsNullOrEmpty(synthesizedTags)
+                ? baseText
+                : (string.IsNullOrEmpty(baseText) ? synthesizedTags : $"{baseText}\n{synthesizedTags}");
+
+            string cleanResponse = ProcessResponse(combined, activeThread, targetRepoPath, brainManager, out followUpPrompt, out checks);
+
+            toolResults = new List<AiToolResult>();
+            if (agentResponse.ToolCalls.Count > 0)
+            {
+                string resultPayload = !string.IsNullOrWhiteSpace(followUpPrompt)
+                    ? followUpPrompt.Trim()
+                    : cleanResponse;
+                foreach (var call in agentResponse.ToolCalls)
+                {
+                    toolResults.Add(new AiToolResult(call.Id, call.Name, resultPayload));
+                }
+            }
+
+            return cleanResponse;
+        }
+
+        // --- Safe Read-Only Git Tools (GIT_STATUS, GIT_DIFF, GIT_LOG) ---
+
+        private static string ProcessGitReadTools(string response, string basePath, string activeThread, ref string followUpPrompt)
+        {
+            string result = response;
+            var outputs = new List<string>();
+
+            result = Regex.Replace(result, @"\[GIT_STATUS(?::\s*[^\]]*)?\]", _ =>
+            {
+                if (!Directory.Exists(Path.Combine(basePath, ".git")))
+                {
+                    outputs.Add($"[GIT STATUS for {activeThread}]\nNot a Git repository.");
+                    return "\n*(I'm looking at git status... 🔍)*\n";
+                }
+
+                string statusOut = RunReadOnlyGit(basePath, "status --short --branch");
+                outputs.Add($"[GIT STATUS for {activeThread}]\n{(string.IsNullOrWhiteSpace(statusOut) ? "Clean working tree." : statusOut)}");
+                return "\n*(I'm looking at git status... 🔍)*\n";
+            }, RegexOptions.IgnoreCase);
+
+            result = Regex.Replace(result, @"\[GIT_DIFF(?::\s*([^\]]*))?\]", m =>
+            {
+                string rawArg = m.Groups[1].Success ? m.Groups[1].Value.Trim() : "";
+                string gitArgs = "diff";
+                string cachedArgs = "diff --cached";
+
+                if (!string.IsNullOrEmpty(rawArg))
+                {
+                    string rel = StripTagPrefix(basePath, rawArg, activeThread);
+                    string? full = ResolveSafePath(basePath, rel);
+                    if (full == null)
+                    {
+                        outputs.Add($"[GIT DIFF: '{rawArg}' - ACCESS DENIED: path is outside the workspace]");
+                        return $"\n*(I'm not allowed to read {rawArg} 🔒)*\n";
+                    }
+                    if (IsSensitivePath(basePath, full))
+                    {
+                        outputs.Add($"[GIT DIFF: '{rawArg}' - ACCESS DENIED: '{rel}' is a protected file]");
+                        return $"\n*(I'm not allowed to read {rawArg} 🔒)*\n";
+                    }
+                    string safeRel = Path.GetRelativePath(basePath, full).Replace('\\', '/');
+                    gitArgs = $"diff -- \"{safeRel}\"";
+                    cachedArgs = $"diff --cached -- \"{safeRel}\"";
+                }
+
+                string diffOut = RunReadOnlyGit(basePath, gitArgs);
+                if (string.IsNullOrWhiteSpace(diffOut))
+                {
+                    diffOut = RunReadOnlyGit(basePath, cachedArgs);
+                }
+
+                const int maxDiffChars = 12000;
+                if (diffOut.Length > maxDiffChars)
+                {
+                    diffOut = diffOut.Substring(0, maxDiffChars) + "\n... [Diff truncated after 12000 characters]";
+                }
+
+                string label = string.IsNullOrEmpty(rawArg) ? activeThread : rawArg;
+                outputs.Add($"[GIT DIFF for {label}]\n{(string.IsNullOrWhiteSpace(diffOut) ? "No uncommitted diff." : diffOut)}");
+                return "\n*(I'm reading git diff... 📖)*\n";
+            }, RegexOptions.IgnoreCase);
+
+            result = Regex.Replace(result, @"\[GIT_LOG(?::\s*([^\]]*))?\]", m =>
+            {
+                int count = 10;
+                if (m.Groups[1].Success && int.TryParse(m.Groups[1].Value.Trim(), out int parsed) && parsed > 0)
+                {
+                    count = Math.Clamp(parsed, 1, 30);
+                }
+
+                string logOut = RunReadOnlyGit(basePath, $"log -n {count} --oneline --decorate");
+                outputs.Add($"[GIT LOG (last {count} commits)]\n{(string.IsNullOrWhiteSpace(logOut) ? "No commits found." : logOut)}");
+                return "\n*(I'm reading git log... 📖)*\n";
+            }, RegexOptions.IgnoreCase);
+
+            if (outputs.Count > 0)
+            {
+                string block = string.Join("\n\n", outputs);
+                followUpPrompt = string.IsNullOrEmpty(followUpPrompt) ? block : followUpPrompt + "\n\n" + block;
+            }
+
+            return result;
+        }
+
+        private static string RunReadOnlyGit(string workingDir, string arguments)
+        {
+            if (string.IsNullOrWhiteSpace(workingDir) || !Directory.Exists(workingDir))
+                return "";
+
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = arguments,
+                    WorkingDirectory = workingDir,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = System.Text.Encoding.UTF8,
+                    StandardErrorEncoding = System.Text.Encoding.UTF8
+                };
+
+                using var proc = Process.Start(psi);
+                if (proc == null) return "";
+
+                var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+                var stderrTask = proc.StandardError.ReadToEndAsync();
+
+                if (!proc.WaitForExit(4000))
+                {
+                    try { proc.Kill(true); } catch { }
+                    return "Git command timed out.";
+                }
+
+                Task.WaitAll(stdoutTask, stderrTask);
+                string stdout = stdoutTask.Result.Trim();
+                string stderr = stderrTask.Result.Trim();
+
+                return !string.IsNullOrWhiteSpace(stdout) ? stdout : stderr;
+            }
+            catch (Exception ex)
+            {
+                return $"Git error: {ex.Message}";
+            }
         }
     }
 }

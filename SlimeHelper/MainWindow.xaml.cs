@@ -117,6 +117,7 @@ namespace SlimeHelper
         private ChatWindow? _chatWindow;
         private bool IsChatOpen => _chatWindow != null && _chatWindow.IsLoaded && _chatWindow.IsVisible;
         public event Action<string>? AiStatusChanged;
+        public event Action<string, string>? AiStreamChunkReceived;
         public event Action<string, string>? AiResponseReceived;
         public event Action<string>? AiErrorOccurred;
         public event Action<string, string, string>? AiUserMessageReceived;
@@ -1461,30 +1462,28 @@ namespace SlimeHelper
 
                 AiUserMessageReceived?.Invoke(activeThread, prompt, source);
 
+                SlimeToolManager.CurrentObsidianVaultPath = settings.ObsidianVaultPath;
+                SlimeToolManager.CurrentReposRootPath = settings.ReposRootPath;
+
                 var todoFolders = _brainManager.GetTodoScanFolders(activeThread, settings.ObsidianVaultPath);
-                string standardContext = ContextManager.BuildFullContext(settings, prompt, lastStatus, todoFolders);
+                string standardContext = ContextManager.BuildCompactContext(settings, prompt, lastStatus, todoFolders, targetRepoPath);
                 string tagContext = "";
+                bool mentionsReadme = Regex.IsMatch(prompt, @"\b(readme|overview|översikt|about\s+the\s+project)\b", RegexOptions.IgnoreCase);
 
                 foreach (var path in boundPaths)
                 {
-                    tagContext += $"\n[Bound Context for {new DirectoryInfo(path).Name}]\n";
+                    string repoDirName = new DirectoryInfo(path).Name;
+                    tagContext += $"\n[Bound Workspace: {repoDirName} ({path})]\n";
                     string? readmeFile = Directory.GetFiles(path, "README.md", SearchOption.TopDirectoryOnly).FirstOrDefault();
-                    if (readmeFile != null)
+                    if (readmeFile != null && mentionsReadme)
                     {
                         string readmeContent = File.ReadAllText(readmeFile);
                         tagContext += $"--- README.md ---\n{(readmeContent.Length > 1000 ? readmeContent.Substring(0, 1000) + "..." : readmeContent)}\n";
                     }
-
-                    // Sök i det faktiska kod-repot
-                    var searchResults = ObsidianService.SearchVaultContent(path, prompt, 2);
-                    if (searchResults.Any())
-                    {
-                        tagContext += "--- Relevant Files Found in Repo ---\n" + string.Join("\n", searchResults) + "\n";
-                    }
                 }
 
-                // Sök även i Slimes EGNA anteckningar för detta repo!
-                if (activeThread != "General")
+                // Only pre-search internal repo notes when the prompt asks about notes/decisions/memory
+                if (activeThread != "General" && Regex.IsMatch(prompt, @"\b(note|notes|anteckning|minne|remember|decision|architecture)\b", RegexOptions.IgnoreCase))
                 {
                     string brainRepoPath = _brainManager.GetRepoBrainPath(activeThread);
                     if (!string.IsNullOrEmpty(brainRepoPath))
@@ -1497,110 +1496,142 @@ namespace SlimeHelper
                     }
                 }
 
-                string historyContext = _brainManager.GetHistoryContext(activeThread, 6);
                 string memoryContext = _brainManager.GetMemoryNetworkContext(prompt, activeThread);
-                var queryBuilder = new System.Text.StringBuilder();
+                var systemBuilder = new System.Text.StringBuilder();
 
                 if (!string.IsNullOrWhiteSpace(standardContext) || !string.IsNullOrWhiteSpace(tagContext) || !string.IsNullOrWhiteSpace(memoryContext))
                 {
-                    queryBuilder.AppendLine("[System Context]");
-                    if (!string.IsNullOrWhiteSpace(memoryContext)) queryBuilder.AppendLine(memoryContext);
-                    if (!string.IsNullOrWhiteSpace(standardContext)) queryBuilder.AppendLine(standardContext);
-                    if (!string.IsNullOrWhiteSpace(tagContext)) queryBuilder.AppendLine(tagContext);
+                    systemBuilder.AppendLine("[System Context]");
+                    if (!string.IsNullOrWhiteSpace(memoryContext)) systemBuilder.AppendLine(memoryContext);
+                    if (!string.IsNullOrWhiteSpace(standardContext)) systemBuilder.AppendLine(standardContext);
+                    if (!string.IsNullOrWhiteSpace(tagContext)) systemBuilder.AppendLine(tagContext);
                 }
 
-                // NYTT: Lägg till AI-verktygen dynamiskt via Tool Managern!
                 if (activeThread != "General")
                 {
-                    queryBuilder.AppendLine(SlimeToolManager.GetToolInstructions(targetRepoPath));
+                    systemBuilder.AppendLine(SlimeToolManager.GetToolInstructions(targetRepoPath));
                 }
                 else
                 {
-                    queryBuilder.AppendLine(SlimeToolManager.GetMemoryToolInstructions());
+                    systemBuilder.AppendLine(SlimeToolManager.GetMemoryToolInstructions());
                 }
 
-                // Include upcoming Google Calendar events when the user asks about schedule/week/meetings
-                if (File.Exists("credentials.json") && Regex.IsMatch(prompt, @"\b(schedule|calendar|kalender|schema|week|vecka|tomorrow|imorgon|today|idag|meeting|möte|events?|agenda|busy|free|ledig|upptagen)\b", RegexOptions.IgnoreCase))
-                {
-                    try
-                    {
-                        var calTask = _calendarWatcher.GetUpcomingEventsSummaryAsync(14, 15);
-                        if (await Task.WhenAny(calTask, Task.Delay(3500)) == calTask)
-                        {
-                            string? calSummary = await calTask;
-                            if (!string.IsNullOrWhiteSpace(calSummary))
-                            {
-                                queryBuilder.AppendLine("\n[Upcoming Google Calendar Events (Next 14 Days)]");
-                                queryBuilder.AppendLine(calSummary);
-                            }
-                        }
-                    }
-                    catch { }
-                }
+                if (!string.IsNullOrEmpty(cwdHint)) systemBuilder.AppendLine("\n" + cwdHint);
 
-                if (!string.IsNullOrWhiteSpace(historyContext))
-                {
-                    queryBuilder.AppendLine($"\n[Conversation History ({activeThread})]");
-                    queryBuilder.AppendLine(historyContext);
-                }
+                var userTurnBuilder = new System.Text.StringBuilder();
 
-                if (!string.IsNullOrEmpty(cwdHint)) queryBuilder.AppendLine("\n" + cwdHint);
-
-                // Tydliga sökfrågor ("filer med ordet X i sig", "var används X") söker vi åt henne direkt.
-                // Då behöver hon inte välja rätt verktyg själv, och svaret bygger på riktiga träffar.
+                // Pre-fetch search results when the user's prompt clearly asks "where is X used" / "files containing X"
                 string? preSearchTerm = !string.IsNullOrEmpty(targetRepoPath) ? SlimeToolManager.ExtractSearchTerm(prompt) : null;
                 if (preSearchTerm != null)
                 {
                     string preResults = SlimeToolManager.RunSearch(targetRepoPath, preSearchTerm);
-                    queryBuilder.AppendLine($"\n[Pre-fetched Search Results for \"{preSearchTerm}\"]");
-                    queryBuilder.AppendLine("```");
-                    queryBuilder.AppendLine(preResults);
-                    queryBuilder.AppendLine("```");
-                    queryBuilder.AppendLine("These results were already fetched for the user's request. Answer directly from them: show the actual matching files and lines, using the exact paths shown. " +
-                                            "If a section ends with '... (+N more)', tell the user that N more exist that you were not shown. Never add entries that are not in the results. " +
-                                            "Do NOT use LIST_FILES or SEARCH_FILES for this again.");
+                    userTurnBuilder.AppendLine($"[Pre-fetched Search Results for \"{preSearchTerm}\"]");
+                    userTurnBuilder.AppendLine("```");
+                    userTurnBuilder.AppendLine(preResults);
+                    userTurnBuilder.AppendLine("```");
+                    userTurnBuilder.AppendLine("These results were already fetched for the user's request. Answer directly from them: show the actual matching files and lines, using the exact paths shown. " +
+                                               "If a section ends with '... (+N more)', tell the user that N more exist that you were not shown. Never add entries that are not in the results. " +
+                                               "Do NOT use LIST_FILES or SEARCH_FILES for this again.\n");
                 }
 
-                queryBuilder.AppendLine("\n[Language Requirement]");
-                queryBuilder.AppendLine("CRITICAL: You are Slime, an English-speaking AI desktop assistant. You must ALWAYS respond in English and do not use emojis in what you say. Even if the user writes, asks, or prompts in Swedish or any other language, every response, explanation, and message from you MUST be exclusively in English without emojis. Never answer in Swedish.\n");
+                userTurnBuilder.Append(prompt);
 
-                queryBuilder.AppendLine("\n[User Prompt]");
-                queryBuilder.AppendLine(prompt);
+                // Build structured multi-turn conversation history so the model gets clean user/assistant/tool roles
+                var conversationTurns = new List<AiConversationTurn>();
+                foreach (var histMsg in _brainManager.GetHistoryMessages(activeThread).TakeLast(6))
+                {
+                    if (histMsg.Role.Equals("User", StringComparison.OrdinalIgnoreCase))
+                    {
+                        conversationTurns.Add(AiConversationTurn.User(histMsg.Content));
+                    }
+                    else if (histMsg.Role.Equals("Slime", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string cleanedHist = SlimeToolManager.RemoveStatusLines(histMsg.Content);
+                        if (!string.IsNullOrWhiteSpace(cleanedHist))
+                        {
+                            conversationTurns.Add(AiConversationTurn.Assistant(cleanedHist));
+                        }
+                    }
+                }
+                conversationTurns.Add(AiConversationTurn.User(userTurnBuilder.ToString()));
 
-                string fullQuery = queryBuilder.ToString();
+                var nativeTools = SlimeToolManager.GetNativeTools(activeThread, targetRepoPath);
+                string systemContext = systemBuilder.ToString();
 
-                // Skicka till AI
-                // Nollställ räknaren av verkligt skrivna ändringar, så att vi kan jämföra med vad hon påstår
                 SlimeToolManager.ResetModificationCount();
 
-                // 1. Första AI-anropet
-                response = await AiService.AskSlime(fullQuery, provider, apiKey);
-                response = SlimeToolManager.StripHallucinatedTurns(response);
+                var streamBuffer = new System.Text.StringBuilder();
+                bool isTurnStreaming = false;
+                void HandleStreamDelta(string delta)
+                {
+                    if (!isTurnStreaming) return;
+                    streamBuffer.Append(delta);
+                    string preview = SlimeToolManager.SanitizeStreamingPreview(streamBuffer.ToString());
+                    if (!string.IsNullOrWhiteSpace(preview))
+                    {
+                        Dispatcher.InvokeAsync(() =>
+                        {
+                            if (!isTurnStreaming) return;
+                            SpeechText.Text = preview;
+                            AiStreamChunkReceived?.Invoke(activeThread, preview);
+                        });
+                    }
+                }
 
-                // 2. Kolla om hon använde verktyg (t.ex. [READ_FILE])
+                // 1. First AI turn (with native tool declarations + live streaming)
+                isTurnStreaming = true;
+                AiAgentResponse agentResp = await AiService.AskSlimeAgentAsync(
+                    systemContext,
+                    conversationTurns,
+                    nativeTools,
+                    provider,
+                    apiKey,
+                    onTextDelta: HandleStreamDelta);
+                isTurnStreaming = false;
+
+                if (agentResp.IsError)
+                {
+                    throw new InvalidOperationException(agentResp.Text);
+                }
+
                 string followUpPrompt;
-                string cleanResponse = SlimeToolManager.ProcessResponse(response, activeThread, targetRepoPath, _brainManager, out followUpPrompt, out var pendingChecks);
+                string cleanResponse = SlimeToolManager.ProcessAgentResponse(
+                    agentResp,
+                    activeThread,
+                    targetRepoPath,
+                    _brainManager,
+                    out followUpPrompt,
+                    out var pendingChecks,
+                    out var toolResults);
 
-                // Spara första steget i historiken
+                response = cleanResponse;
+
+                // Save initial user message in history
                 _brainManager.SaveMessage(activeThread, "User", prompt);
-                _brainManager.SaveMessage(activeThread, "Slime", cleanResponse);
 
-                // Om hon bad om bygge/test/lint: kör det asynkront och skicka tillbaka resultatet till henne
                 if (pendingChecks.Count > 0)
                 {
-                    SpeechText.Text = cleanResponse; // visar t.ex. "I'm running the build check... 🔨"
+                    SpeechText.Text = cleanResponse;
                     AiStatusChanged?.Invoke(cleanResponse);
                     followUpPrompt = await SlimeToolManager.RunCheckRequestsAsync(pendingChecks, targetRepoPath, activeThread, followUpPrompt);
                 }
 
                 followUpPrompt = await ExecutePendingCalendarEventsAsync(followUpPrompt);
+                followUpPrompt = await ExecutePendingCalendarQueriesAsync(followUpPrompt);
 
-                // 3. AGENT-LOOP: Om hon bad om att få läsa en fil, skicka tillbaka filinnehållet till henne i smyg!
-                var agentLog = new System.Text.StringBuilder();
+                // If the model invoked a native tool (e.g. edit_file or remember) without providing any spoken reply yet,
+                // feed the execution confirmation back so she gives her final answer to the user.
+                if (string.IsNullOrEmpty(followUpPrompt) &&
+                    agentResp.ToolCalls.Count > 0 &&
+                    string.IsNullOrWhiteSpace(SlimeToolManager.RemoveStatusLines(cleanResponse)))
+                {
+                    followUpPrompt = $"[Tool Execution Completed]\n{cleanResponse}";
+                }
+
+                // 3. Multi-turn Agent Loop
                 int rounds = 0;
-                const int maxRounds = 8; // lista -> läsa -> ändra -> bygga -> rätta ...
+                const int maxRounds = 8;
 
-                // Påstår hon en ändring som appen aldrig skrev? Då får hon en rättelse och en chans att göra det på riktigt (en gång per fråga).
                 int correctionsLeft = 1;
                 bool NeedsFollowUp()
                 {
@@ -1616,47 +1647,22 @@ namespace SlimeHelper
 
                 while (NeedsFollowUp() && rounds++ < maxRounds)
                 {
-                    SpeechText.Text = cleanResponse; // the UI shows e.g. "I'm reading the file..."
+                    SpeechText.Text = cleanResponse;
                     AiStatusChanged?.Invoke(cleanResponse);
 
-                    // Spara bara en kort markör i historiken, annars hamnar hela filinnehåll i chat_history.json
                     string shortNote = followUpPrompt.Length > 400
                         ? followUpPrompt.Substring(0, 400) + "... [truncated]"
                         : followUpPrompt;
                     _brainManager.SaveMessage(activeThread, "System", shortNote);
 
-                    // Hela uppföljningarna från den här frågan behålls i loopen så att hon minns tidigare rundor
-                    agentLog.AppendLine(followUpPrompt);
-                    agentLog.AppendLine();
-
-                    // Uppföljningen får verktygsinstruktionerna, den ursprungliga frågan och tydlig order att svara nu.
-                    // Annars "kollar" hon bara och visar aldrig resultatet för användaren.
-                    var loopBuilder = new System.Text.StringBuilder();
-                    if (!string.IsNullOrEmpty(cwdHint)) loopBuilder.AppendLine(cwdHint + "\n");
-                    loopBuilder.AppendLine(activeThread != "General"
-                        ? SlimeToolManager.GetToolInstructions(targetRepoPath)
-                        : SlimeToolManager.GetMemoryToolInstructions());
-
-                    loopBuilder.AppendLine($"\n[Conversation History ({activeThread})]");
-                    loopBuilder.AppendLine(_brainManager.GetHistoryContext(activeThread, 6));
-
-                    loopBuilder.AppendLine("\n[Original User Request]");
-                    loopBuilder.AppendLine(prompt);
-
-                    loopBuilder.AppendLine("\n[Tool Results]");
-                    loopBuilder.AppendLine(agentLog.ToString());
-
-                    loopBuilder.AppendLine("[Instructions]");
-                    loopBuilder.AppendLine("- LANGUAGE: You must ALWAYS respond in English and never use emojis in what you say. Never reply in Swedish.");
+                    var guidanceBuilder = new System.Text.StringBuilder();
                     if (SlimeToolManager.WriteFailureCount >= 3)
                     {
-                        // Multiple edit failures occurred: instruct the model to stop retrying and report the issue to the user
-                        loopBuilder.AppendLine("You have attempted to edit this file multiple times and the tool reported errors. Stop attempting [EDIT_FILE]. " +
-                                               "Explain to the user what you were trying to change and what specific error occurred so they can assist.");
+                        guidanceBuilder.AppendLine("You have attempted to edit this file multiple times and the tool reported errors. Stop attempting edit_file / [EDIT_FILE]. " +
+                                                   "Explain to the user what you were trying to change and what specific error occurred so they can assist.");
                     }
                     else if (SlimeToolManager.ModificationCount > 0)
                     {
-                        // File has already been modified on disk during this request
                         bool hasCheckResult = followUpPrompt.Contains("[CHECK RESULT:");
                         bool hasCheckFailure = hasCheckResult && (
                             Regex.IsMatch(followUpPrompt, @"\[CHECK RESULT:[^\]]*-\s*FAILED") ||
@@ -1664,52 +1670,80 @@ namespace SlimeHelper
                             followUpPrompt.Contains("[CHECK RESULT: NOT RUN"));
                         if (hasCheckFailure)
                         {
-                            loopBuilder.AppendLine("A previous check (build/test/lint) FAILED with errors shown in the tool results above. Read the error messages carefully and use [EDIT_FILE] to FIX the error. " +
-                                                   "Do NOT duplicate or re-insert methods that are already present in the file; only repair the compilation or test error. " +
-                                                   "In C#, ensure all methods and properties are located INSIDE the class body before the class's closing '}' brace. " +
-                                                   "Inspect the file lines shown above to place members correctly. After fixing, verify again with [RUN_CHECK: build].");
+                            guidanceBuilder.AppendLine("A previous check (build/test/lint) FAILED with errors shown in the tool results above. Read the error messages carefully and use edit_file / [EDIT_FILE] to FIX the error. " +
+                                                       "Do NOT duplicate or re-insert methods that are already present in the file; only repair the compilation or test error. " +
+                                                       "In C#, ensure all methods and properties are located INSIDE the class body before the class's closing '}' brace. " +
+                                                       "After fixing, verify again with run_check / [RUN_CHECK: build].");
                         }
                         else if (hasCheckResult)
                         {
-                            // All checks completed successfully
-                            loopBuilder.AppendLine("The requested change has ALREADY been successfully written to disk and verified. Do NOT output [EDIT_FILE] or [WRITE_CODE] again to repeat the change. " +
-                                                   "Provide your final response to the user now, briefly summarizing what you did and confirming that the build succeeded.");
+                            guidanceBuilder.AppendLine("The requested change has ALREADY been successfully written to disk and verified. Do NOT call edit_file or write_code again to repeat the change. " +
+                                                       "Provide your final response to the user now, briefly summarizing what you did and confirming that the build succeeded.");
                         }
                         else if (followUpPrompt.Contains("EDIT_FILE on") && followUpPrompt.Contains("FAILED"))
                         {
-                            // An edit attempt failed in this turn
-                            loopBuilder.AppendLine("Your last edit attempt FAILED as shown in the tool results above. Read the error message carefully. " +
-                                                   "If the error says a method was placed outside a class, ensure your replacement puts the method INSIDE the class before the closing '}'. " +
-                                                   "If you need to inspect the current file content on disk, use [READ_FILE]. Otherwise, ensure your [FIND] text matches the file exactly.");
+                            guidanceBuilder.AppendLine("Your last edit attempt FAILED as shown in the tool results above. Read the error message carefully. " +
+                                                       "If the error says a method was placed outside a class, ensure your replacement puts the method INSIDE the class before the closing '}'. " +
+                                                       "If you need to inspect the current file content on disk, use read_file / [READ_FILE]. Otherwise, ensure your FIND text matches the file exactly.");
                         }
                         else
                         {
-                            loopBuilder.AppendLine("The requested change has ALREADY been successfully written to disk. Do NOT output [EDIT_FILE] or [WRITE_CODE] again to repeat the change. " +
-                                                   "Provide your final response to the user now, briefly summarizing what you did.");
+                            guidanceBuilder.AppendLine("The requested change has ALREADY been successfully written to disk. Do NOT call edit_file or write_code again to repeat the change. " +
+                                                       "Provide your final response to the user now, briefly summarizing what you did.");
                         }
                     }
                     else if (SlimeToolManager.IsChangeRequest(prompt))
                     {
-                        // Change requested but nothing has been written to disk yet (e.g. Slime only read the file)
-                        loopBuilder.AppendLine("The tool results above contain the file contents or information you requested. You have NOT yet applied the requested change to disk: you MUST now output the required tool block ([EDIT_FILE] with [FIND] and [REPLACE], or [WRITE_CODE] for a new file) to apply the change. Do NOT merely describe the change in text or output bare markdown code blocks - you MUST execute it using the tool block. After editing, verify your work with [RUN_CHECK: build] if relevant.");
+                        guidanceBuilder.AppendLine("The tool results above contain the file contents or information you requested. You have NOT yet applied the requested change to disk: you MUST now invoke the required tool (edit_file / [EDIT_FILE] or write_code / [WRITE_CODE]) to apply the change. Do NOT merely describe the change in text. After editing, verify your work with run_check / [RUN_CHECK: build] if relevant.");
                     }
                     else
                     {
-                        loopBuilder.AppendLine("The tool results above are the data you asked for. Answer the original user request NOW, based on them. " +
-                                               "Show the user the actual information (for example the file names or the file content) in your reply - do not just say that you looked. " +
-                                               "Do not call a tool again for something already in the results above. Only use another tool if you still need information that is not there. " +
-                                               "The user only sees your FINAL reply, never the earlier steps, so do not mention earlier attempts or errors you already fixed, and do not apologise for them. Just say what is true now.");
+                        guidanceBuilder.AppendLine("The tool results above are the data you asked for. Answer the original user request NOW, based on them. " +
+                                                   "Show the user the actual information in your reply - do not just say that you looked. " +
+                                                   "Do not call a tool again for something already in the results above.");
                     }
 
-                    string loopQuery = loopBuilder.ToString();
+                    string fullToolFeedback = $"{followUpPrompt}\n\n[Guidance]\n{guidanceBuilder}";
 
-                    response = await AiService.AskSlime(loopQuery, provider, apiKey);
-                    response = SlimeToolManager.StripHallucinatedTurns(response);
+                    // Append structured assistant + tool result turns to conversation history
+                    if (agentResp.ToolCalls.Count > 0)
+                    {
+                        conversationTurns.Add(AiConversationTurn.Assistant(agentResp.Text, agentResp.ToolCalls));
+                        var updatedResults = agentResp.ToolCalls
+                            .Select(tc => new AiToolResult(tc.Id, tc.Name, fullToolFeedback))
+                            .ToList();
+                        conversationTurns.Add(AiConversationTurn.Tool(updatedResults));
+                    }
+                    else
+                    {
+                        conversationTurns.Add(AiConversationTurn.Assistant(cleanResponse));
+                        conversationTurns.Add(AiConversationTurn.User($"[Tool Results]\n{fullToolFeedback}"));
+                    }
 
-                    // Processa nya verktyg i svaret; en ny uppföljning startar nästa runda
-                    cleanResponse = SlimeToolManager.ProcessResponse(response, activeThread, targetRepoPath, _brainManager, out followUpPrompt, out pendingChecks);
+                    streamBuffer.Clear();
+                    isTurnStreaming = true;
+                    agentResp = await AiService.AskSlimeAgentAsync(
+                        systemContext,
+                        conversationTurns,
+                        nativeTools,
+                        provider,
+                        apiKey,
+                        onTextDelta: HandleStreamDelta);
+                    isTurnStreaming = false;
 
-                    _brainManager.SaveMessage(activeThread, "Slime", cleanResponse);
+                    if (agentResp.IsError)
+                    {
+                        throw new InvalidOperationException(agentResp.Text);
+                    }
+
+                    cleanResponse = SlimeToolManager.ProcessAgentResponse(
+                        agentResp,
+                        activeThread,
+                        targetRepoPath,
+                        _brainManager,
+                        out followUpPrompt,
+                        out pendingChecks,
+                        out toolResults);
 
                     if (pendingChecks.Count > 0)
                     {
@@ -1719,7 +1753,18 @@ namespace SlimeHelper
                     }
 
                     followUpPrompt = await ExecutePendingCalendarEventsAsync(followUpPrompt);
+                    followUpPrompt = await ExecutePendingCalendarQueriesAsync(followUpPrompt);
+
+                    if (string.IsNullOrEmpty(followUpPrompt) &&
+                        agentResp.ToolCalls.Count > 0 &&
+                        string.IsNullOrWhiteSpace(SlimeToolManager.RemoveStatusLines(cleanResponse)))
+                    {
+                        followUpPrompt = $"[Tool Execution Completed]\n{cleanResponse}";
+                    }
                 }
+
+                // Save final assistant reply to persistent chat history once at completion
+                _brainManager.SaveMessage(activeThread, "Slime", cleanResponse);
 
                 // 3b. Om hon fortfarande påstår något som aldrig skrevs: säg det rakt ut, och låt henne veta det i historiken
                 // Till CLI:t: hela händelsekedjan (läste, ändrade, byggde, resultat) följt av hennes svar
@@ -1886,6 +1931,36 @@ namespace SlimeHelper
                 var (ok, msg) = await _calendarWatcher.AddStructuredEventAsync(req.Title, req.Start, req.DurationMinutes, req.Description);
                 sb.AppendLine(ok ? $"- SUCCESS: {msg}" : $"- FAILED: {msg}");
             }
+            return sb.ToString();
+        }
+
+        private async Task<string> ExecutePendingCalendarQueriesAsync(string followUpPrompt)
+        {
+            var queries = SlimeToolManager.TakePendingCalendarQueries();
+            if (queries.Count == 0) return followUpPrompt;
+
+            int maxDays = Math.Clamp(queries.Max(), 1, 60);
+            var sb = new System.Text.StringBuilder(followUpPrompt);
+            sb.AppendLine($"\n[UPCOMING CALENDAR EVENTS (Next {maxDays} days)]");
+
+            try
+            {
+                var calTask = _calendarWatcher.GetUpcomingEventsSummaryAsync(maxDays, 15);
+                if (await Task.WhenAny(calTask, Task.Delay(3500)) == calTask)
+                {
+                    string? summary = await calTask;
+                    sb.AppendLine(string.IsNullOrWhiteSpace(summary) ? "No upcoming Google Calendar events found or credentials.json not configured." : summary);
+                }
+                else
+                {
+                    sb.AppendLine("Calendar check timed out.");
+                }
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine($"Calendar error: {ex.Message}");
+            }
+
             return sb.ToString();
         }
 
@@ -2892,19 +2967,6 @@ namespace SlimeHelper
     {
         public string status { get; set; } = "";
         public string text { get; set; } = "";
-    }
-
-    public class SlimeSettings
-    {
-        public string CurrentSkin { get; set; } = "Default";
-        public string SelectedProvider { get; set; } = "Gemini";
-        public string GeminiKey { get; set; } = "";
-        public string ClaudeKey { get; set; } = "";
-        public string GitHubToken { get; set; } = "";
-        public string ObsidianVaultPath { get; set; } = "";
-        public string ReposRootPath { get; set; } = "";
-        public bool AutoStartWithWindows { get; set; } = false;
-        public bool AllowDesktopRoaming { get; set; } = true;
     }
 
     public class PaperDollProfile

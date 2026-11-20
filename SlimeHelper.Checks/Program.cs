@@ -1240,6 +1240,174 @@ namespace SlimeHelper.Checks
                   && calReqs[1].Title == "Team Sync" && calReqs[1].DurationMinutes == 60 && calReqs[1].Description == "Weekly review"
                   && calUi.Contains("Scheduling \"Dentist\""),
                   "ADD_CALENDAR parses single-line and block-form event requests");
+
+            NativeToolAndCompactContextTests(memBrain, work);
+        }
+
+        static void NativeToolAndCompactContextTests(SlimeBrainManager brain, string work)
+        {
+            Console.WriteLine("\n== Native Function Calling, Streaming & Compact Context");
+
+            string repo = NewRepo(work, brain, "native", out string tag);
+            File.WriteAllText(Path.Combine(repo, "Hello.cs"), "public class Hello\n{\n    public int X = 1;\n}\n");
+            File.WriteAllText(Path.Combine(repo, ".env"), "API_SECRET=topsecret");
+
+            // 1. Native tool schema scoping (General vs bound repo)
+            var generalTools = SlimeToolManager.GetNativeTools("General", "");
+            var repoTools = SlimeToolManager.GetNativeTools(tag, repo);
+            Check(generalTools.Any(t => t.Name == "remember")
+                  && generalTools.Any(t => t.Name == "get_calendar_events")
+                  && generalTools.Any(t => t.Name == "get_todos")
+                  && !generalTools.Any(t => t.Name == "edit_file"),
+                  "General thread exposes memory/calendar/context native tools without code-editing tools");
+            Check(repoTools.Any(t => t.Name == "read_file")
+                  && repoTools.Any(t => t.Name == "edit_file")
+                  && repoTools.Any(t => t.Name == "run_check")
+                  && repoTools.Any(t => t.Name == "git_status")
+                  && repoTools.Any(t => t.Name == "git_diff")
+                  && repoTools.Any(t => t.Name == "git_log"),
+                  "Bound repo thread exposes workspace and read-only git native tools");
+
+            // 2. Gemini native request serialization + SSE streaming + functionCall parsing
+            var turns = new List<AiConversationTurn>
+            {
+                AiConversationTurn.User("Read Hello.cs"),
+                AiConversationTurn.Assistant("Let me check.", [
+                    new AiToolCall("call_1", "read_file", new Dictionary<string, string> { ["path"] = "Hello.cs" })
+                ]),
+                AiConversationTurn.Tool([
+                    new AiToolResult("call_1", "read_file", "public class Hello {}")
+                ])
+            };
+            string geminiReq = GeminiProvider.BuildRequestJson("System test", turns, repoTools);
+            Check(geminiReq.Contains("\"function_declarations\"")
+                  && geminiReq.Contains("\"functionCall\"")
+                  && geminiReq.Contains("\"functionResponse\""),
+                  "GeminiProvider.BuildRequestJson serializes function_declarations, functionCall, and functionResponse");
+
+            var streamedChunks = new List<string>();
+            var geminiSse = new[]
+            {
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Checking \"}]}}]}",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"the file.\"},{\"functionCall\":{\"name\":\"read_file\",\"args\":{\"path\":\"Hello.cs\"}}}]}}]}",
+                "data: [DONE]"
+            };
+            var geminiParsed = GeminiProvider.ParseSseLines(geminiSse, delta => streamedChunks.Add(delta));
+            Check(geminiParsed.Text == "Checking the file."
+                  && streamedChunks.Count == 2
+                  && geminiParsed.ToolCalls.Count == 1
+                  && geminiParsed.ToolCalls[0].Name == "read_file"
+                  && geminiParsed.ToolCalls[0].Arguments["path"] == "Hello.cs",
+                  "GeminiProvider.ParseSseLines streams text deltas and extracts native functionCall");
+
+            // 3. Claude native request serialization + SSE streaming (text_delta + input_json_delta)
+            string claudeReq = ClaudeProvider.BuildRequestJson("System test", turns, repoTools, stream: true);
+            Check(claudeReq.Contains("\"input_schema\"")
+                  && claudeReq.Contains("\"tool_use\"")
+                  && claudeReq.Contains("\"tool_result\"")
+                  && claudeReq.Contains("\"stream\":true"),
+                  "ClaudeProvider.BuildRequestJson serializes input_schema, tool_use, tool_result, and stream flag");
+
+            var claudeChunks = new List<string>();
+            var claudeSse = new[]
+            {
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Reading \"}}",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"now.\"}}",
+                "data: {\"type\":\"content_block_stop\",\"index\":0}",
+                "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_123\",\"name\":\"edit_file\",\"input\":{}}}",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"Hello.cs\\\",\"}}",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"find\\\":\\\"public int X = 1;\\\",\\\"replace\\\":\\\"public int X = 99;\\\"}\"}}",
+                "data: {\"type\":\"content_block_stop\",\"index\":1}"
+            };
+            var claudeParsed = ClaudeProvider.ParseSseLines(claudeSse, delta => claudeChunks.Add(delta));
+            Check(claudeParsed.Text == "Reading now."
+                  && claudeChunks.Count == 2
+                  && claudeParsed.ToolCalls.Count == 1
+                  && claudeParsed.ToolCalls[0].Id == "toolu_123"
+                  && claudeParsed.ToolCalls[0].Name == "edit_file"
+                  && claudeParsed.ToolCalls[0].Arguments["replace"] == "public int X = 99;",
+                  "ClaudeProvider.ParseSseLines streams text_delta and reassembles fragmented input_json_delta tool_use");
+
+            // 4. Native tool calls run through SlimeToolManager safety guards (read-before-edit enforced!)
+            SlimeToolManager.ResetModificationCount();
+            SlimeToolManager.ProcessAgentResponse(claudeParsed, tag, repo, brain, out string errFollow, out _, out var errResults);
+            Check(errFollow.Contains("have not read") && SlimeToolManager.ModificationCount == 0 && errResults.Count == 1,
+                  "Native edit_file call before read_file is blocked by read-before-edit guard", errFollow);
+
+            // Now execute native read_file followed by native edit_file
+            SlimeToolManager.ProcessAgentResponse(geminiParsed, tag, repo, brain, out string readFollow, out _, out var readResults);
+            Check(readFollow.Contains("public int X = 1;") && readResults.Count == 1,
+                  "Native read_file call reads file and populates structured AiToolResult");
+
+            string editClean = SlimeToolManager.ProcessAgentResponse(claudeParsed, tag, repo, brain, out string editFollow, out _, out _);
+            Check(editFollow == "" && SlimeToolManager.ModificationCount == 1 && File.ReadAllText(Path.Combine(repo, "Hello.cs")).Contains("public int X = 99;"),
+                  "Native edit_file call succeeds after native read_file and modifies disk file", editClean);
+
+            // 5. Streaming preview sanitizer strips partial tool tags & status lines
+            string liveDirty = "Sure, I will open it!\n[READ_FILE: Hello.cs";
+            Check(SlimeToolManager.SanitizeStreamingPreview(liveDirty) == "Sure, I will open it!",
+                  "SanitizeStreamingPreview strips partial tool tag during live streaming");
+
+            // 6. New read-only tools: GET_CALENDAR, GET_TODOS, GET_DAILY_NOTE, SEARCH_NOTES, GIT_STATUS, GIT_DIFF
+            SlimeToolManager.CalendarSummaryProvider = days => $"- 2026-11-21 10:00: Architecture Review (window={days}d)";
+            SlimeToolManager.ProcessResponse("[GET_CALENDAR: 7]", "General", "", brain, out string calFollow, out _);
+            Check(calFollow.Contains("Architecture Review (window=7d)"), "GET_CALENDAR tool fetches upcoming calendar events on demand", calFollow);
+            SlimeToolManager.CalendarSummaryProvider = null;
+
+            string vaultDir = Path.Combine(work, "ObsVault_" + Id());
+            Directory.CreateDirectory(vaultDir);
+            string todayFile = Path.Combine(vaultDir, DateTime.Now.ToString("yyyy-MM-dd") + ".md");
+            File.WriteAllText(todayFile, "# Daily Plan\nFocus on native function calling and compact context.\n- [ ] Ship function calling\n");
+            File.WriteAllText(Path.Combine(vaultDir, "ArchitectureNotes.md"), "The quantumflux widget uses spring damping.\n");
+            SlimeToolManager.CurrentObsidianVaultPath = vaultDir;
+
+            SlimeToolManager.ProcessResponse("[GET_DAILY_NOTE]", "General", "", brain, out string dailyFollow, out _);
+            Check(dailyFollow.Contains("Focus on native function calling"), "GET_DAILY_NOTE reads today's Obsidian daily note on demand", dailyFollow);
+
+            SlimeToolManager.ProcessResponse("[GET_TODOS]", "General", "", brain, out string todosFollow, out _);
+            Check(todosFollow.Contains("Ship function calling"), "GET_TODOS lists open To-Do items on demand", todosFollow);
+
+            SlimeToolManager.ProcessResponse("[SEARCH_NOTES: quantumflux]", "General", "", brain, out string searchNotesFollow, out _);
+            Check(searchNotesFollow.Contains("spring damping"), "SEARCH_NOTES finds matching Obsidian vault notes on demand", searchNotesFollow);
+
+            // Protected file in GIT_DIFF is refused, and filenames containing "diff" are preserved intact
+            SlimeToolManager.ProcessResponse("[GIT_DIFF: .env]", tag, repo, brain, out string envDiffFollow, out _);
+            Check(envDiffFollow.Contains("ACCESS DENIED") && envDiffFollow.Contains("protected file"),
+                  "GIT_DIFF refuses to diff protected secret files (.env)", envDiffFollow);
+
+            File.WriteAllText(Path.Combine(repo, "diff_helper.cs"), "class DiffHelper {}\n");
+            SlimeToolManager.ProcessResponse("[GIT_DIFF: diff_helper.cs]", tag, repo, brain, out string diffFileFollow, out _);
+            Check(diffFileFollow.Contains("[GIT DIFF for diff_helper.cs]") && !diffFileFollow.Contains("diff --cached_helper"),
+                  "GIT_DIFF preserves filenames containing 'diff' without corrupting cached diff command", diffFileFollow);
+
+            Check(!SlimeToolManager.GetToolInstructions(repo).Contains("Never answer in Swedish"),
+                  "GetToolInstructions defers to ContextManager [Language Rule] instead of hardcoding English-only");
+
+            // 7. Part 2: Smart Compact Context vs Full Context token reduction
+            var settings = new SlimeSettings
+            {
+                ObsidianVaultPath = vaultDir,
+                ReposRootPath = work,
+                ResponseLanguage = "Auto"
+            };
+            string codingPrompt = "Explain how Hello.cs works";
+            string fullCtx = ContextManager.BuildFullContext(settings, "quantumflux daily plan", "Editing Hello.cs", new[] { vaultDir });
+            string compactCtx = ContextManager.BuildCompactContext(settings, codingPrompt, "Editing Hello.cs", new[] { vaultDir }, repo);
+
+            Check(ContextManager.EstimateTokens(compactCtx) < ContextManager.EstimateTokens(fullCtx)
+                  && compactCtx.Contains("Open To-Dos:")
+                  && compactCtx.Contains("Today's Daily Note: available")
+                  && !compactCtx.Contains("spring damping"),
+                  "BuildCompactContext replaces heavy vault/daily/todo dumps with compact pointers on coding prompts",
+                  $"compact={ContextManager.EstimateTokens(compactCtx)} tokens vs full={ContextManager.EstimateTokens(fullCtx)} tokens");
+
+            string todoPromptCtx = ContextManager.BuildCompactContext(settings, "What is on my todo list?", "", new[] { vaultDir }, repo);
+            Check(todoPromptCtx.Contains("Ship function calling"),
+                  "BuildCompactContext automatically inlines To-Do items when the prompt asks about todos", todoPromptCtx);
+
+            Check(compactCtx.Contains("Match the language the user writes in"),
+                  "BuildLanguageRule supports Auto language mode so Slime can reply in Swedish or English");
         }
 
         static string? FindRepoRoot()

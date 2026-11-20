@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.IO;
 
 namespace SlimeHelper
@@ -96,6 +96,7 @@ namespace SlimeHelper
                 Arguments = arguments,
                 WorkingDirectory = workingDir,
                 RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
@@ -103,9 +104,15 @@ namespace SlimeHelper
             using var process = Process.Start(startInfo);
             if (process == null) return string.Empty;
 
-            string output = process.StandardOutput.ReadToEnd().Trim();
-            process.WaitForExit();
-            return output;
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(4000))
+            {
+                try { process.Kill(true); } catch { }
+                return string.Empty;
+            }
+            Task.WaitAll(stdoutTask, stderrTask);
+            return stdoutTask.Result.Trim();
         }
     }
 }

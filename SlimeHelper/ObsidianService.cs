@@ -130,8 +130,25 @@ namespace SlimeHelper
                                .ToList();
         }
 
-        // 3. Scanner för Dagens Anteckning
-        public static string GetDailyNoteSnippet(string vaultPath)
+        // 3. Scanner for Today's Daily Note
+        public static bool HasDailyNote(string vaultPath)
+        {
+            if (string.IsNullOrWhiteSpace(vaultPath) || !Directory.Exists(vaultPath))
+                return false;
+
+            try
+            {
+                string today = DateTime.Now.ToString("yyyy-MM-dd");
+                return EnumerateMarkdownFiles(vaultPath)
+                    .Any(f => Path.GetFileName(f).Contains(today, StringComparison.OrdinalIgnoreCase));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static string GetDailyNoteSnippet(string vaultPath, int maxChars = 250)
         {
             if (string.IsNullOrWhiteSpace(vaultPath) || !Directory.Exists(vaultPath))
                 return string.Empty;
@@ -145,7 +162,8 @@ namespace SlimeHelper
                 if (dailyFile != null && File.Exists(dailyFile))
                 {
                     string content = File.ReadAllText(dailyFile);
-                    return content.Length > 250 ? content.Substring(0, 250) + "..." : content;
+                    int limit = Math.Max(50, maxChars);
+                    return content.Length > limit ? content.Substring(0, limit) + "..." : content;
                 }
             }
             catch { }
