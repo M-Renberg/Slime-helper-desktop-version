@@ -307,6 +307,11 @@ namespace SlimeHelper
                     string repoPrefix = !string.IsNullOrEmpty(repoLabel) ? $"{repoLabel}: " : "";
                     string failureMsg = $"CI failed on {repoPrefix}{run.Name} ({run.HeadBranch})!\nClick to inspect failure.";
                     ShowTempMessage(failureMsg, "ERROR", 8);
+
+                    if (IsChatOpen)
+                    {
+                        _chatWindow?.DisplayWorkflowFailure(run, logSnippet);
+                    }
                 });
             };
 
@@ -1342,7 +1347,87 @@ namespace SlimeHelper
             catch { }
         }
 
-        public async void ProcessAiRequest(string prompt, string? cliRequestId = null, string? workingDir = null, string? requestedThread = null, string source = "App")
+        public (GitHubWorkflowRun? Run, string? LogSnippet) GetLastFailedWorkflow() =>
+            (_lastFailedRun, _lastFailedLogSnippet);
+
+        public async Task<string> BuildDailyBriefingAsync(string? activeThread = null)
+        {
+            var settings = LoadFullSettings();
+            string thread = string.IsNullOrWhiteSpace(activeThread) ? "General" : activeThread;
+            var memory = _brainManager.LoadMemory();
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"☀️ Slime Daily Briefing — {DateTime.Now:yyyy-MM-dd (dddd) HH:mm}");
+            sb.AppendLine($"• Status: {memory.GetStatusSummary()}");
+
+            // 1. Calendar
+            if (CalendarWatcher.HasCredentialsFile())
+            {
+                try
+                {
+                    var calTask = _calendarWatcher.GetUpcomingEventsSummaryAsync(2, 8);
+                    if (await Task.WhenAny(calTask, Task.Delay(3000)) == calTask)
+                    {
+                        string? calSummary = await calTask;
+                        if (!string.IsNullOrWhiteSpace(calSummary))
+                        {
+                            sb.AppendLine("\n📅 Upcoming Schedule (48h):");
+                            sb.AppendLine(calSummary);
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            // 2. Open To-Dos
+            string[] scanFolders = _brainManager.GetTodoScanFolders(thread, settings.ObsidianVaultPath);
+            var openTodos = NotesManager.ListUnfinishedTodos(scanFolders);
+            sb.AppendLine($"\n📝 Open To-Do Tasks ({openTodos.Count}):");
+            if (openTodos.Count == 0)
+            {
+                sb.AppendLine("- None! All caught up.");
+            }
+            else
+            {
+                foreach (var item in openTodos.Take(8))
+                {
+                    sb.AppendLine($"- #{item.Index}: {item.Text} ({Path.GetFileName(item.FilePath)})");
+                }
+                if (openTodos.Count > 8)
+                {
+                    sb.AppendLine($"- ... (+{openTodos.Count - 8} more)");
+                }
+            }
+
+            // 3. Uncommitted Repositories
+            var dirtyRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(settings.ReposRootPath) && Directory.Exists(settings.ReposRootPath))
+            {
+                foreach (var d in RepoScannerService.ScanDirtyRepos(settings.ReposRootPath)) dirtyRepos.Add(d);
+            }
+            foreach (var kv in _brainManager.GetBoundRepos())
+            {
+                if (!string.IsNullOrWhiteSpace(kv.Value) && Directory.Exists(Path.Combine(kv.Value, ".git")))
+                {
+                    var (st, _) = RepoScannerService.CheckGitStatus(kv.Value);
+                    if (st == "DIRTY") dirtyRepos.Add($"{kv.Key} ({Path.GetFileName(kv.Value)})");
+                }
+            }
+            sb.AppendLine(dirtyRepos.Count > 0
+                ? $"\n📂 Uncommitted Changes: {string.Join(", ", dirtyRepos)}"
+                : "\n📂 Git Status: All tracked repositories are clean.");
+
+            // 4. Latest CI Failure alert
+            if (_lastFailedRun != null)
+            {
+                string? repoName = GitHubService.TryGetRepoNameFromUrl(_lastFailedRun.HtmlUrl);
+                sb.AppendLine($"\n🚨 Latest CI Alert: {_lastFailedRun.Name} failed on '{_lastFailedRun.HeadBranch}'{(repoName != null ? $" ({repoName})" : "")}. Type `/gh fix` to diagnose!");
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        public async void ProcessAiRequest(string prompt, string? cliRequestId = null, string? workingDir = null, string? requestedThread = null, string source = "App", IReadOnlyList<AiImageAttachment>? images = null)
         {
             isInteracting = true;
             _isAiBusy = true;
@@ -1536,9 +1621,16 @@ namespace SlimeHelper
 
                 userTurnBuilder.Append(prompt);
 
+                string threadSummary = _brainManager.GetThreadSummary(activeThread);
+                if (!string.IsNullOrWhiteSpace(threadSummary))
+                {
+                    systemBuilder.AppendLine($"\n[Earlier Conversation Summary ({activeThread})]");
+                    systemBuilder.AppendLine(threadSummary);
+                }
+
                 // Build structured multi-turn conversation history so the model gets clean user/assistant/tool roles
                 var conversationTurns = new List<AiConversationTurn>();
-                foreach (var histMsg in _brainManager.GetHistoryMessages(activeThread).TakeLast(6))
+                foreach (var histMsg in _brainManager.GetHistoryMessages(activeThread).TakeLast(14))
                 {
                     if (histMsg.Role.Equals("User", StringComparison.OrdinalIgnoreCase))
                     {
@@ -1553,7 +1645,7 @@ namespace SlimeHelper
                         }
                     }
                 }
-                conversationTurns.Add(AiConversationTurn.User(userTurnBuilder.ToString()));
+                conversationTurns.Add(AiConversationTurn.User(userTurnBuilder.ToString(), images));
 
                 var nativeTools = SlimeToolManager.GetNativeTools(activeThread, targetRepoPath);
                 string systemContext = systemBuilder.ToString();
@@ -1928,7 +2020,9 @@ namespace SlimeHelper
                     continue;
                 }
 
-                var (ok, msg) = await _calendarWatcher.AddStructuredEventAsync(req.Title, req.Start, req.DurationMinutes, req.Description);
+                var (ok, msg) = req.IsMove
+                    ? await _calendarWatcher.MoveOrUpdateEventAsync(req.Title, req.Start, req.DurationMinutes)
+                    : await _calendarWatcher.AddStructuredEventAsync(req.Title, req.Start, req.DurationMinutes, req.Description);
                 sb.AppendLine(ok ? $"- SUCCESS: {msg}" : $"- FAILED: {msg}");
             }
             return sb.ToString();
@@ -2896,6 +2990,31 @@ namespace SlimeHelper
                         {
                             string csvPath = prompt[16..].Trim();
                             _ = Task.Run(() => HandleAnalyzeDatasetCommand(csvPath));
+                        }
+                        else if (prompt.Equals("DAILY_BRIEF", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                var cwdRepo = _brainManager.FindBoundRepoForDirectory(workingDir);
+                                string thread = cwdRepo?.Tag ?? "General";
+                                string brief = await BuildDailyBriefingAsync(thread);
+                                WriteCliResponse(requestId, brief);
+                            });
+                        }
+                        else if (prompt.StartsWith("UNDO_EDIT:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string targetTag = prompt[10..].Trim();
+                            Dispatcher.Invoke(() =>
+                            {
+                                var cwdRepo = _brainManager.FindBoundRepoForDirectory(workingDir);
+                                string tagToUndo = !string.IsNullOrWhiteSpace(targetTag)
+                                    ? targetTag
+                                    : (cwdRepo?.Tag ?? (_chatWindow?.CurrentThread ?? "General"));
+                                string? basePath = cwdRepo?.Path;
+                                var (ok, _, msg) = _brainManager.UndoLastFileChange(tagToUndo, basePath);
+                                ShowTempMessage(msg, ok ? "HURRAY" : "UNSURE", 4);
+                                WriteCliResponse(requestId, msg, !ok);
+                            });
                         }
                         else if (prompt.StartsWith("BIND_REPO:", StringComparison.OrdinalIgnoreCase))
                         {

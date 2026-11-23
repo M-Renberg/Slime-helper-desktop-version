@@ -270,6 +270,67 @@ namespace SlimeHelper
             }
         }
 
+        public async Task<(bool Success, string Message)> MoveOrUpdateEventAsync(
+            string searchTitle,
+            DateTimeOffset newStart,
+            int? durationMinutes = null)
+        {
+            if (string.IsNullOrWhiteSpace(searchTitle))
+                return (false, "Event title to move cannot be empty.");
+
+            if (!HasCredentialsFile())
+                return (false, "Google Calendar credentials.json not found.");
+
+            try
+            {
+                var service = await CreateServiceAsync();
+                var searchFrom = DateTimeOffset.Now.Date;
+                var listReq = service.Events.List("primary");
+                listReq.TimeMinDateTimeOffset = new DateTimeOffset(searchFrom);
+                listReq.TimeMaxDateTimeOffset = new DateTimeOffset(searchFrom.AddDays(30));
+                listReq.SingleEvents = true;
+                listReq.ShowDeleted = false;
+                listReq.OrderBy = EventsResource.ListRequest.OrderByEnum.StartTime;
+                listReq.MaxResults = 50;
+
+                Events events = await listReq.ExecuteAsync();
+                string needle = searchTitle.Trim();
+
+                Event? match = events.Items?
+                    .Where(e => e.Status != "cancelled" && !string.IsNullOrWhiteSpace(e.Summary))
+                    .OrderBy(e => e.Start?.DateTimeDateTimeOffset?.Date == newStart.Date ? 0 : 1)
+                    .FirstOrDefault(e => e.Summary.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
+                                         needle.Contains(e.Summary, StringComparison.OrdinalIgnoreCase));
+
+                if (match != null)
+                {
+                    int dur = durationMinutes ?? 60;
+                    if (!durationMinutes.HasValue &&
+                        match.Start?.DateTimeDateTimeOffset is DateTimeOffset oldStart &&
+                        match.End?.DateTimeDateTimeOffset is DateTimeOffset oldEnd &&
+                        (oldEnd - oldStart).TotalMinutes >= 5)
+                    {
+                        dur = (int)(oldEnd - oldStart).TotalMinutes;
+                    }
+                    dur = Math.Clamp(dur, 5, 24 * 60);
+
+                    match.Start = new EventDateTime { DateTimeDateTimeOffset = newStart };
+                    match.End = new EventDateTime { DateTimeDateTimeOffset = newStart.AddMinutes(dur) };
+
+                    await service.Events.Update(match, "primary", match.Id).ExecuteAsync();
+                    return (true, $"Moved \"{match.Summary}\" to {newStart:yyyy-MM-dd HH:mm} ({dur} min).");
+                }
+
+                // Fallback: if no existing matching event was found, schedule it at the requested new time
+                return await AddStructuredEventAsync(needle, newStart, durationMinutes ?? 60);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error moving event: {ex.Message}");
+                return (false, $"Failed to move Google Calendar event: {ex.Message}");
+            }
+        }
+
         public async Task<bool> AddEventAsync(string input)
         {
             try

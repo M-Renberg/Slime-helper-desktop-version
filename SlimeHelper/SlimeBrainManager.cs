@@ -18,9 +18,13 @@ namespace SlimeHelper
         private string _subjectsFolder = ""; // FIX 1: Lade till variabeln här!
         private string _profilePath = "";
         private string _historyPath = "";
+        private string _threadSummariesPath = "";
         private string _memoryBankPath = "";
 
+        public const int MaxHistoryMessagesPerThread = 24;
+
         private Dictionary<string, List<SlimeMemoryMessage>> _chatHistory = new();
+        private Dictionary<string, string> _threadSummaries = new(StringComparer.OrdinalIgnoreCase);
 
         private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
@@ -108,6 +112,7 @@ namespace SlimeHelper
 
             _profilePath = Path.Combine(_userFolder, "profile.json");
             _historyPath = Path.Combine(_memoryFolder, "chat_history.json");
+            _threadSummariesPath = Path.Combine(_memoryFolder, "thread_summaries.json");
             _memoryBankPath = Path.Combine(_memoryFolder, "memory_bank.json");
         }
 
@@ -152,6 +157,94 @@ namespace SlimeHelper
                 }
             }
             catch { _chatHistory = new(); }
+
+            try
+            {
+                if (!string.IsNullOrEmpty(_threadSummariesPath) && File.Exists(_threadSummariesPath))
+                {
+                    string sumJson = File.ReadAllText(_threadSummariesPath);
+                    var loaded = JsonSerializer.Deserialize<Dictionary<string, string>>(sumJson);
+                    _threadSummaries = loaded != null
+                        ? new Dictionary<string, string>(loaded, StringComparer.OrdinalIgnoreCase)
+                        : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                }
+                else
+                {
+                    _threadSummaries = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                }
+            }
+            catch { _threadSummaries = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); }
+        }
+
+        private void AppendToThreadSummary(string threadId, SlimeMemoryMessage evicted)
+        {
+            if (evicted.Role.Equals("System", StringComparison.OrdinalIgnoreCase)) return;
+            string clean = evicted.Role == "Slime"
+                ? SlimeToolManager.RemoveStatusLines(evicted.Content)
+                : evicted.Content;
+            if (string.IsNullOrWhiteSpace(clean)) return;
+
+            string oneLine = clean.Replace("\r", " ").Replace("\n", " ").Trim();
+            if (oneLine.Length > 140) oneLine = oneLine[..137] + "...";
+            string entry = $"{evicted.Role}: {oneLine}";
+
+            if (_threadSummaries.TryGetValue(threadId, out var existing) && !string.IsNullOrWhiteSpace(existing))
+            {
+                string combined = existing + " | " + entry;
+                if (combined.Length > 900)
+                {
+                    combined = "..." + combined[^890..];
+                }
+                _threadSummaries[threadId] = combined;
+            }
+            else
+            {
+                _threadSummaries[threadId] = entry;
+            }
+        }
+
+        private void SaveThreadSummaries()
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(_threadSummariesPath))
+                {
+                    File.WriteAllText(_threadSummariesPath, JsonSerializer.Serialize(_threadSummaries, JsonOptions));
+                }
+            }
+            catch { }
+        }
+
+        public string GetThreadSummary(string threadId)
+        {
+            return _threadSummaries.TryGetValue(threadId, out var sum) ? sum : "";
+        }
+
+        /// <summary>
+        /// Compacts older messages in the thread into the rolling thread summary, keeping only the most recent keepRecent messages.
+        /// </summary>
+        public string CompactThreadHistory(string threadId, int keepRecent = 6)
+        {
+            if (!_chatHistory.TryGetValue(threadId, out var list) || list.Count <= keepRecent)
+            {
+                return GetThreadSummary(threadId);
+            }
+
+            int toRoll = list.Count - Math.Max(2, keepRecent);
+            for (int i = 0; i < toRoll; i++)
+            {
+                AppendToThreadSummary(threadId, list[0]);
+                list.RemoveAt(0);
+            }
+
+            try
+            {
+                File.WriteAllText(_historyPath, JsonSerializer.Serialize(_chatHistory, JsonOptions));
+                SaveThreadSummaries();
+            }
+            catch { }
+
+            return GetThreadSummary(threadId);
         }
 
         public void SaveMessage(string threadId, string role, string content)
@@ -172,12 +265,20 @@ namespace SlimeHelper
 
                 _chatHistory[threadId].Add(new SlimeMemoryMessage { Role = role, Content = content });
 
-                if (_chatHistory[threadId].Count > 10)
+                bool rolledAny = false;
+                while (_chatHistory[threadId].Count > MaxHistoryMessagesPerThread)
                 {
+                    var evicted = _chatHistory[threadId][0];
                     _chatHistory[threadId].RemoveAt(0);
+                    AppendToThreadSummary(threadId, evicted);
+                    rolledAny = true;
                 }
 
                 File.WriteAllText(_historyPath, JsonSerializer.Serialize(_chatHistory, JsonOptions));
+                if (rolledAny)
+                {
+                    SaveThreadSummaries();
+                }
             }
             catch (Exception ex)
             {
@@ -185,22 +286,27 @@ namespace SlimeHelper
             }
         }
 
-        public string GetHistoryContext(string threadId, int maxMessages = 6)
+        public string GetHistoryContext(string threadId, int maxMessages = 14)
         {
-            if (!_chatHistory.ContainsKey(threadId) || _chatHistory[threadId].Count == 0)
-                return "";
-
-            var messages = _chatHistory[threadId].TakeLast(maxMessages);
             var sb = new System.Text.StringBuilder();
-
-            foreach (var msg in messages)
+            if (_threadSummaries.TryGetValue(threadId, out var summary) && !string.IsNullOrWhiteSpace(summary))
             {
-                // Städar även gammal historik som redan innehåller statusrader
-                string text = msg.Role == "Slime" ? SlimeToolManager.RemoveStatusLines(msg.Content) : msg.Content;
-                if (string.IsNullOrWhiteSpace(text)) continue;
-
-                sb.AppendLine($"{msg.Role}: {text}");
+                sb.AppendLine($"[Earlier Conversation Summary: {summary}]");
             }
+
+            if (_chatHistory.ContainsKey(threadId) && _chatHistory[threadId].Count > 0)
+            {
+                var messages = _chatHistory[threadId].TakeLast(maxMessages);
+                foreach (var msg in messages)
+                {
+                    // Städar även gammal historik som redan innehåller statusrader
+                    string text = msg.Role == "Slime" ? SlimeToolManager.RemoveStatusLines(msg.Content) : msg.Content;
+                    if (string.IsNullOrWhiteSpace(text)) continue;
+
+                    sb.AppendLine($"{msg.Role}: {text}");
+                }
+            }
+
             return sb.ToString().Trim();
         }
 
@@ -546,13 +652,24 @@ namespace SlimeHelper
                 } while (File.Exists(target));
 
                 File.Copy(fullPath, target, false);
+                try
+                {
+                    string relOriginal = Path.GetRelativePath(basePath, fullPath).Replace('\\', '/');
+                    File.WriteAllText(target + ".meta", $"{fullPath}\n{relOriginal}");
+                }
+                catch { }
 
                 var old = new DirectoryInfo(dir).GetFiles("*.bak")
                     .OrderByDescending(f => f.CreationTimeUtc)
                     .Skip(50);
                 foreach (var f in old)
                 {
-                    try { f.Delete(); } catch { }
+                    try
+                    {
+                        f.Delete();
+                        if (File.Exists(f.FullName + ".meta")) File.Delete(f.FullName + ".meta");
+                    }
+                    catch { }
                 }
 
                 return true;
@@ -561,6 +678,92 @@ namespace SlimeHelper
             {
                 System.Diagnostics.Debug.WriteLine($"Failed to back up file: {ex.Message}");
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Restores the most recently backed-up file for the given repository tag and removes the consumed backup.
+        /// </summary>
+        public (bool Success, string RestoredRelativePath, string Message) UndoLastFileChange(string tag, string? repoBasePath = null)
+        {
+            try
+            {
+                string cleanTag = (tag ?? "").Replace("#", "").Trim();
+                if (string.IsNullOrWhiteSpace(cleanTag) || cleanTag.Equals("General", StringComparison.OrdinalIgnoreCase))
+                {
+                    return (false, "", "Switch to a bound #repo thread to undo code changes.");
+                }
+
+                string dir = Path.Combine(_reposFolder, cleanTag, "backups");
+                if (!Directory.Exists(dir))
+                {
+                    return (false, "", $"No backups found for #{cleanTag}.");
+                }
+
+                var latestBak = new DirectoryInfo(dir).GetFiles("*.bak")
+                    .OrderByDescending(f => f.CreationTimeUtc)
+                    .ThenByDescending(f => f.Name, StringComparer.OrdinalIgnoreCase)
+                    .FirstOrDefault();
+
+                if (latestBak == null)
+                {
+                    return (false, "", $"No backups available to undo in #{cleanTag}.");
+                }
+
+                string metaFile = latestBak.FullName + ".meta";
+                string? targetFullPath = null;
+                string restoredRel = "";
+
+                if (File.Exists(metaFile))
+                {
+                    string[] lines = File.ReadAllLines(metaFile);
+                    if (lines.Length > 0 && !string.IsNullOrWhiteSpace(lines[0]))
+                    {
+                        targetFullPath = lines[0].Trim();
+                    }
+                    if (lines.Length > 1 && !string.IsNullOrWhiteSpace(lines[1]))
+                    {
+                        restoredRel = lines[1].Trim();
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(targetFullPath))
+                {
+                    string? basePath = repoBasePath;
+                    if (string.IsNullOrWhiteSpace(basePath))
+                    {
+                        var map = LoadRepoMap();
+                        map.TryGetValue(NormalizeTag(cleanTag), out basePath);
+                    }
+
+                    if (string.IsNullOrWhiteSpace(basePath) || !Directory.Exists(basePath))
+                    {
+                        return (false, "", $"Could not resolve workspace path for #{cleanTag}.");
+                    }
+
+                    string stem = Path.GetFileNameWithoutExtension(latestBak.Name);
+                    int underscore = stem.IndexOf('_');
+                    string flatRel = underscore >= 0 ? stem[(underscore + 1)..] : stem;
+                    restoredRel = flatRel;
+                    targetFullPath = Path.Combine(basePath, flatRel);
+                }
+
+                if (string.IsNullOrWhiteSpace(restoredRel))
+                {
+                    restoredRel = Path.GetFileName(targetFullPath);
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(targetFullPath)!);
+                File.Copy(latestBak.FullName, targetFullPath, overwrite: true);
+
+                try { latestBak.Delete(); } catch { }
+                try { if (File.Exists(metaFile)) File.Delete(metaFile); } catch { }
+
+                return (true, restoredRel, $"Restored '{restoredRel}' from backup.");
+            }
+            catch (Exception ex)
+            {
+                return (false, "", $"Undo failed: {ex.Message}");
             }
         }
 

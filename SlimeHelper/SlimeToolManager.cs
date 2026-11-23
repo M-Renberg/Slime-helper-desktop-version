@@ -97,7 +97,8 @@ namespace SlimeHelper
             DateTimeOffset Start,
             int DurationMinutes,
             string? Description,
-            string? ParseError);
+            string? ParseError,
+            bool IsMove = false);
 
         private static readonly List<CalendarEventRequest> PendingCalendarEvents = new();
         private static readonly List<int> PendingCalendarQueries = new();
@@ -417,6 +418,8 @@ namespace SlimeHelper
             sb.AppendLine("To add an event to the user's Google Calendar (only when asked to schedule/add an event):");
             sb.AppendLine("[ADD_CALENDAR: Event Title | yyyy-MM-dd HH:mm | 60]");
             sb.AppendLine("(Optional 3rd field is duration in minutes, default 60. Use exact yyyy-MM-dd HH:mm based on the current date above.)");
+            sb.AppendLine("To move or reschedule an existing Google Calendar event:");
+            sb.AppendLine("[MOVE_CALENDAR: Existing Event Title | yyyy-MM-dd HH:mm | 60]");
             sb.AppendLine("To check upcoming Google Calendar events: [GET_CALENDAR: 14]");
             sb.AppendLine("To view open To-Do items: [GET_TODOS]");
             sb.AppendLine("To read today's Obsidian daily note: [GET_DAILY_NOTE]");
@@ -452,6 +455,7 @@ namespace SlimeHelper
             sb.AppendLine("To remove an outdated memory: [FORGET_MEMORY: key]");
             sb.AppendLine($"To add a Google Calendar event (current local date/time: {DateTime.Now:yyyy-MM-dd (dddd) HH:mm}):");
             sb.AppendLine("[ADD_CALENDAR: Event Title | yyyy-MM-dd HH:mm | 60]");
+            sb.AppendLine("To move or reschedule an existing Google Calendar event: [MOVE_CALENDAR: Existing Event Title | yyyy-MM-dd HH:mm | 60]");
             sb.AppendLine("To read upcoming Google Calendar events: [GET_CALENDAR: 14]");
             sb.AppendLine("To fetch open To-Do items on demand: [GET_TODOS]");
             sb.AppendLine("To read today's Obsidian daily note on demand: [GET_DAILY_NOTE]");
@@ -634,6 +638,20 @@ namespace SlimeHelper
                     return req.ParseError == null
                         ? $"\n*(Scheduling \"{req.Title}\" in Google Calendar... 📅)*\n"
                         : $"\n*(I couldn't schedule that calendar event: {req.ParseError})*\n";
+                },
+                RegexOptions.IgnoreCase);
+
+            // Google Calendar Tool: MOVE_CALENDAR (moves or updates an existing event's start time)
+            cleanResponse = Regex.Replace(
+                cleanResponse,
+                @"\[MOVE_CALENDAR:\s*([^\]]+)\]",
+                m =>
+                {
+                    var req = ParseCalendarEventRequest(m.Groups[1].Value.Trim(), null) with { IsMove = true };
+                    lock (PendingCalendarEvents) { PendingCalendarEvents.Add(req); }
+                    return req.ParseError == null
+                        ? $"\n*(Moving \"{req.Title}\" in Google Calendar... 📅)*\n"
+                        : $"\n*(I couldn't move that calendar event: {req.ParseError})*\n";
                 },
                 RegexOptions.IgnoreCase);
 
@@ -1513,9 +1531,9 @@ namespace SlimeHelper
                 }
 
                 string rel = StripTagPrefix(basePath, filename, activeThread);
-                if (TryEditFile(basePath, rel, edits, brainManager, activeThread, out string error))
+                if (TryEditFile(basePath, rel, edits, brainManager, activeThread, out string error, out int addedLines, out int removedLines))
                 {
-                    return $"\n*(I edited {filename}: {edits.Count} change{(edits.Count == 1 ? "" : "s")} ✏️)*\n";
+                    return $"\n*(I edited {filename}: {edits.Count} change{(edits.Count == 1 ? "" : "s")} (+{addedLines} / -{removedLines} lines) ✏️)*\n";
                 }
 
                 followUps.Add($"[SYSTEM INJECTION: EDIT_FILE on {filename} FAILED and NOTHING was changed: {error}. Read the relevant part of the file again (READ_FILE, optionally with a line range) and retry with FIND text copied exactly from the file.]");
@@ -1532,14 +1550,42 @@ namespace SlimeHelper
             return result;
         }
 
+        public static (int Added, int Removed) ComputeLineDiffStats(string oldText, string newText)
+        {
+            string[] oldLines = (oldText ?? "").Replace("\r\n", "\n").Split('\n');
+            string[] newLines = (newText ?? "").Replace("\r\n", "\n").Split('\n');
+
+            var oldCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var l in oldLines)
+            {
+                oldCounts[l] = oldCounts.TryGetValue(l, out int c) ? c + 1 : 1;
+            }
+
+            int common = 0;
+            foreach (var l in newLines)
+            {
+                if (oldCounts.TryGetValue(l, out int c) && c > 0)
+                {
+                    common++;
+                    oldCounts[l] = c - 1;
+                }
+            }
+
+            int removed = Math.Max(0, oldLines.Length - common);
+            int added = Math.Max(0, newLines.Length - common);
+            return (added, removed);
+        }
+
         /// <summary>
         /// Tillämpar FIND/REPLACE på en befintlig fil. Allt eller inget: misslyckas en ändring skrivs ingenting.
         /// Bevarar BOM och radslut (CRLF/LF), och säkerhetskopierar filen först.
         /// </summary>
         private static bool TryEditFile(string basePath, string relative, List<(string Find, string Replace)> edits,
-                                        SlimeBrainManager brain, string tag, out string error)
+                                        SlimeBrainManager brain, string tag, out string error, out int addedLines, out int removedLines)
         {
             error = "";
+            addedLines = 0;
+            removedLines = 0;
 
             string? directPath = ResolveSafePath(basePath, relative);
             if (directPath == null) { error = "the path is outside the project"; return false; }
@@ -1717,6 +1763,7 @@ namespace SlimeHelper
                 }
 
                 File.WriteAllText(fullPath, result, new System.Text.UTF8Encoding(hasBom));
+                (addedLines, removedLines) = ComputeLineDiffStats(original, content);
                 MarkRead(fullPath);
                 if (directPath != null && !directPath.Equals(fullPath, StringComparison.OrdinalIgnoreCase))
                 {
@@ -3057,7 +3104,7 @@ namespace SlimeHelper
         // --- Native Function Calling (Tool Declarations, Conversion & Execution) ---
 
         private static readonly Regex StreamingTagStripRegex = new(
-            @"\[(?:SAVE_NOTE|REMEMBER|EDIT_FILE|WRITE_CODE|WRITE_DOC|CREATE_FILE):[\s\S]*?(?:\[/(?:SAVE_NOTE|REMEMBER|EDIT_FILE|WRITE_CODE|WRITE_DOC|CREATE_FILE)\]|$)|\[(?:CONNECT_MEMORY|RECALL_MEMORY|FORGET_MEMORY|ADD_CALENDAR|GET_CALENDAR|GET_TODOS|GET_DAILY_NOTE|SEARCH_NOTES|GET_DIRTY_REPOS|READ_FILE|LIST_FILES|SEARCH_FILES|RUN_CHECK|GIT_STATUS|GIT_DIFF|GIT_LOG)[^\]]*(?:\]|$)",
+            @"\[(?:SAVE_NOTE|REMEMBER|EDIT_FILE|WRITE_CODE|WRITE_DOC|CREATE_FILE):[\s\S]*?(?:\[/(?:SAVE_NOTE|REMEMBER|EDIT_FILE|WRITE_CODE|WRITE_DOC|CREATE_FILE)\]|$)|\[(?:CONNECT_MEMORY|RECALL_MEMORY|FORGET_MEMORY|ADD_CALENDAR|MOVE_CALENDAR|GET_CALENDAR|GET_TODOS|GET_DAILY_NOTE|SEARCH_NOTES|GET_DIRTY_REPOS|READ_FILE|LIST_FILES|SEARCH_FILES|RUN_CHECK|GIT_STATUS|GIT_DIFF|GIT_LOG)[^\]]*(?:\]|$)",
             RegexOptions.IgnoreCase);
 
         /// <summary>
@@ -3143,6 +3190,17 @@ namespace SlimeHelper
                         ["description"] = new("string", "Optional event description.")
                     },
                     ["title", "start_time"]),
+
+                new(
+                    "move_calendar_event",
+                    "Move or reschedule an existing event in the user's Google Calendar to a new start time.",
+                    new Dictionary<string, AiToolParameter>
+                    {
+                        ["title"] = new("string", "Existing event title or keyword (e.g. 'BAM')."),
+                        ["new_start_time"] = new("string", "New start date and time in exact 'yyyy-MM-dd HH:mm' format."),
+                        ["duration_minutes"] = new("string", "Optional new duration in minutes.")
+                    },
+                    ["title", "new_start_time"]),
 
                 new(
                     "get_calendar_events",
@@ -3341,6 +3399,16 @@ namespace SlimeHelper
                             sb.AppendLine($"[ADD_CALENDAR: {title} | {start} | {dur}]");
                         else
                             sb.AppendLine($"[ADD_CALENDAR: {title} | {start} | {dur}]\n{desc}\n[/ADD_CALENDAR]");
+                        break;
+                    }
+                    case "move_calendar_event":
+                    case "move_calendar":
+                    {
+                        string title = Arg(call, "title");
+                        string start = Arg(call, "new_start_time", "start_time", "start");
+                        string dur = Arg(call, "duration_minutes", "duration");
+                        if (string.IsNullOrWhiteSpace(dur)) dur = "60";
+                        sb.AppendLine($"[MOVE_CALENDAR: {title} | {start} | {dur}]");
                         break;
                     }
                     case "get_calendar_events":

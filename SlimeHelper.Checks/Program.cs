@@ -1450,6 +1450,78 @@ namespace SlimeHelper.Checks
 
             Check(GeminiProvider.DefaultModel == "gemini-3.8-flash" && ClaudeProvider.DefaultModel == "claude-5-5-sonnet" && claudeReq.Contains("\"model\":\"claude-5-5-sonnet\""),
                   "GeminiProvider and ClaudeProvider default to gemini-3.8-flash and claude-5-5-sonnet");
+
+            // 9. Slime Assistant 2.0 (5 Phases: Multimodal serialization, Rolling Thread Summary, Diff Stats & UndoLastFileChange)
+            var imgAttachment = new AiImageAttachment("image/png", "iVBORw0KGgoAAAANSUhEUg==", "screen.png");
+            var mmTurns = new List<AiConversationTurn>
+            {
+                AiConversationTurn.User("What is wrong with this dialog?", [imgAttachment])
+            };
+            string geminiMmJson = GeminiProvider.BuildRequestJson("System", mmTurns, null);
+            string claudeMmJson = ClaudeProvider.BuildRequestJson("System", mmTurns, null);
+            Check(geminiMmJson.Contains("\"inline_data\"") && geminiMmJson.Contains("\"iVBORw0KGgoAAAANSUhEUg==\""),
+                  "Phase 1: GeminiProvider.BuildRequestJson serializes multimodal image attachments as inline_data");
+            Check(claudeMmJson.Contains("\"type\":\"image\"") && claudeMmJson.Contains("\"media_type\":\"image/png\""),
+                  "Phase 1: ClaudeProvider.BuildRequestJson serializes multimodal image attachments as base64 image blocks");
+
+            // Phase 3: Rolling Thread Summary when history exceeds 24 messages or is compacted
+            string sumThread = "#sumtest_" + Id();
+            for (int i = 1; i <= 26; i++)
+            {
+                brain.SaveMessage(sumThread, i % 2 == 1 ? "User" : "Slime", $"Message number {i} discussing feature {i}");
+            }
+            Check(brain.GetHistoryMessages(sumThread).Count == SlimeBrainManager.MaxHistoryMessagesPerThread,
+                  "Phase 3: SlimeBrainManager retains up to 24 messages per thread");
+            string sumCtx = brain.GetHistoryContext(sumThread, 14);
+            Check(sumCtx.Contains("[Earlier Conversation Summary:") && sumCtx.Contains("Message number 1"),
+                  "Phase 3: Evicted older messages are preserved in rolling thread summary", sumCtx);
+
+            // Phase 4: Diff statistics (+X / -Y lines) and UndoLastFileChange
+            string undoRepo = NewRepo(work, brain, "undo", out string undoTag);
+            string undoFile = Path.Combine(undoRepo, "Widget.cs");
+            string initialWidget = "public class Widget\n{\n    public int Size = 1;\n}\n";
+            File.WriteAllText(undoFile, initialWidget);
+
+            SlimeToolManager.ProcessResponse("[READ_FILE: Widget.cs]", undoTag, undoRepo, brain, out _, out _);
+            string editWidgetResp = SlimeToolManager.ProcessResponse(
+                "[EDIT_FILE: Widget.cs]\n[FIND]\n    public int Size = 1;\n[/FIND]\n[REPLACE]\n    public int Size = 2;\n    public int Height = 10;\n[/REPLACE]\n[/EDIT_FILE]",
+                undoTag, undoRepo, brain, out _, out _);
+
+            Check(editWidgetResp.Contains("(+2 / -1 lines)"),
+                  "Phase 4: EDIT_FILE status line includes (+added / -removed lines) diff summary", editWidgetResp);
+            Check(File.ReadAllText(undoFile).Contains("Height = 10;"),
+                  "Phase 4: Widget.cs was modified on disk before undo");
+
+            var (undoOk, restoredRel, undoMsg) = brain.UndoLastFileChange(undoTag, undoRepo);
+            Check(undoOk && restoredRel == "Widget.cs" && File.ReadAllText(undoFile) == initialWidget,
+                  "Phase 4: UndoLastFileChange restores modified file byte-for-byte from backup", undoMsg);
+
+            // 10. Model Fallback Chain & Calendar Move Support
+            Check(GeminiProvider.ShouldFallbackOnError("This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.", 503),
+                  "GeminiProvider.ShouldFallbackOnError triggers fallback on HTTP 503 high demand spike");
+            Check(GeminiProvider.ShouldFallbackOnError("models/gemini-3.8-flash is not found for API version v1beta", 404),
+                  "GeminiProvider.ShouldFallbackOnError triggers fallback on HTTP 404 model not found");
+            Check(!GeminiProvider.ShouldFallbackOnError("API key not valid. Please pass a valid API key.", 400),
+                  "GeminiProvider.ShouldFallbackOnError does not fall back on invalid API key");
+            Check(GeminiProvider.FallbackModels.Length >= 3 && GeminiProvider.FallbackModels[0] == "gemini-3.8-flash" && GeminiProvider.FallbackModels[1] == "gemini-2.5-flash",
+                  "GeminiProvider.FallbackModels defines automatic fallback chain starting with gemini-3.8-flash -> gemini-2.5-flash");
+            Check(ClaudeProvider.FallbackModels.Length >= 3 && ClaudeProvider.FallbackModels[0] == "claude-5-5-sonnet",
+                  "ClaudeProvider.FallbackModels defines automatic fallback chain starting with claude-5-5-sonnet");
+
+            SlimeToolManager.TakePendingCalendarEvents();
+            string moveCalTags = SlimeToolManager.ConvertNativeToolCallsToTags(
+            [
+                new AiToolCall("cal_move_1", "move_calendar_event", new Dictionary<string, string>
+                {
+                    ["title"] = "BAM",
+                    ["new_start_time"] = "2026-11-23 16:00",
+                    ["duration_minutes"] = "60"
+                })
+            ]);
+            string moveCalResp = SlimeToolManager.ProcessResponse(moveCalTags, "General", "", brain, out _, out _);
+            var pendingMoveEvents = SlimeToolManager.TakePendingCalendarEvents();
+            Check(pendingMoveEvents.Count == 1 && pendingMoveEvents[0].IsMove && pendingMoveEvents[0].Title == "BAM" && moveCalResp.Contains("Moving \"BAM\" in Google Calendar"),
+                  "move_calendar_event / [MOVE_CALENDAR] queues a CalendarEventRequest with IsMove=true", moveCalResp);
         }
 
         static string? FindRepoRoot()

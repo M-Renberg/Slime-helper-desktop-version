@@ -38,14 +38,26 @@ namespace SlimeHelper
         string Name,
         string Result);
 
+    public sealed record AiImageAttachment(
+        string MimeType,
+        string Base64Data,
+        string? Label = null);
+
     public sealed class AiConversationTurn
     {
         public string Role { get; init; } = "user"; // "user", "assistant", or "tool"
         public string Text { get; init; } = "";
         public List<AiToolCall> ToolCalls { get; init; } = [];
         public List<AiToolResult> ToolResults { get; init; } = [];
+        public List<AiImageAttachment> Images { get; init; } = [];
 
-        public static AiConversationTurn User(string text) => new() { Role = "user", Text = text };
+        public static AiConversationTurn User(string text, IEnumerable<AiImageAttachment>? images = null) =>
+            new()
+            {
+                Role = "user",
+                Text = text,
+                Images = images != null ? images.ToList() : []
+            };
 
         public static AiConversationTurn Assistant(string text, List<AiToolCall>? toolCalls = null) =>
             new() { Role = "assistant", Text = text, ToolCalls = toolCalls ?? [] };
@@ -154,11 +166,71 @@ namespace SlimeHelper
     public class GeminiProvider : IAiProvider
     {
         public const string DefaultModel = "gemini-3.8-flash";
+
+        public static readonly string[] FallbackModels =
+        [
+            "gemini-3.8-flash",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash"
+        ];
+
+        private static string? _preferredModel;
+        private static DateTime _preferredModelUntil = DateTime.MinValue;
         private static SlimeMemory _memory = new();
 
         public GeminiProvider()
         {
             _memory = AiMemoryStorage.Load();
+        }
+
+        public static bool ShouldFallbackOnError(string? errorMessage, int statusCode = 0)
+        {
+            if (statusCode is 401 or 403) return false;
+            string msg = errorMessage ?? "";
+            if (msg.Contains("API_KEY_INVALID", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("API key not valid", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("invalid x-api-key", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (statusCode is 404 or 429 or 500 or 502 or 503 or 504 or 529) return true;
+
+            return msg.Contains("high demand", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("overloaded", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Quota exceeded", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Resource has been exhausted", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("RESOURCE_EXHAUSTED", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("UNAVAILABLE", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("temporarily unavailable", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("not found", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("is not supported", StringComparison.OrdinalIgnoreCase);
+        }
+
+        public static IReadOnlyList<string> GetOrderedCandidateModels()
+        {
+            if (!string.IsNullOrEmpty(_preferredModel) && DateTime.UtcNow < _preferredModelUntil)
+            {
+                var ordered = new List<string> { _preferredModel };
+                foreach (var m in FallbackModels)
+                {
+                    if (!string.Equals(m, _preferredModel, StringComparison.OrdinalIgnoreCase))
+                        ordered.Add(m);
+                }
+                return ordered;
+            }
+            return FallbackModels;
+        }
+
+        private static void RecordWorkingModel(string model, bool wasFallback)
+        {
+            if (wasFallback)
+            {
+                _preferredModel = model;
+                _preferredModelUntil = DateTime.UtcNow.AddMinutes(3);
+            }
         }
 
         public async Task<string> GetResponseAsync(string prompt, string apiKey)
@@ -178,7 +250,6 @@ namespace SlimeHelper
             }
 
             var client = AiMemoryStorage.SharedHttpClient;
-            var url = $"https://generativelanguage.googleapis.com/v1beta/models/{DefaultModel}:generateContent?key={apiKey}";
 
             string factsString = _memory.Facts.Count > 0 ? string.Join(", ", _memory.Facts.TakeLast(10)) : "";
             string dynamicInstruction = $"You are a sassy anime slime assistant. User: {_memory.UserName}. " +
@@ -197,44 +268,69 @@ namespace SlimeHelper
                 contents = new[] { newUserMessage }
             };
 
-            var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
+            string serializedBody = JsonSerializer.Serialize(requestBody);
+            var candidateModels = GetOrderedCandidateModels();
+            string lastError = "I received an empty response from Gemini.";
 
-            try
+            for (int i = 0; i < candidateModels.Count; i++)
             {
-                var response = await client.PostAsync(url, content);
-                var jsonResponse = await response.Content.ReadAsStringAsync();
+                string model = candidateModels[i];
+                var url = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apiKey}";
 
-                using var doc = JsonDocument.Parse(jsonResponse);
-                var root = doc.RootElement;
-
-                if (root.TryGetProperty("error", out var errorElement))
+                try
                 {
-                    string msg = errorElement.TryGetProperty("message", out var m) ? m.GetString() ?? "Unknown error" : "Unknown error";
-                    if (msg.Contains("Quota exceeded", StringComparison.OrdinalIgnoreCase))
-                    {
-                        return "I'm a bit tired from all the thinking! Give me a minute to rest my slime-brain... 😴";
-                    }
-                    return "API Error: " + msg;
-                }
+                    using var content = new StringContent(serializedBody, Encoding.UTF8, "application/json");
+                    using var response = await client.PostAsync(url, content);
+                    var jsonResponse = await response.Content.ReadAsStringAsync();
 
-                if (root.TryGetProperty("candidates", out var candidates) && candidates.GetArrayLength() > 0)
+                    using var doc = JsonDocument.Parse(jsonResponse);
+                    var root = doc.RootElement;
+
+                    if (root.TryGetProperty("error", out var errorElement))
+                    {
+                        string msg = errorElement.TryGetProperty("message", out var m) ? m.GetString() ?? "Unknown error" : "Unknown error";
+                        if (i + 1 < candidateModels.Count && ShouldFallbackOnError(msg, (int)response.StatusCode))
+                        {
+                            lastError = "API Error: " + msg;
+                            await Task.Delay(250);
+                            continue;
+                        }
+
+                        if (msg.Contains("Quota exceeded", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return "I'm a bit tired from all the thinking! Give me a minute to rest my slime-brain... 😴";
+                        }
+                        return "API Error: " + msg;
+                    }
+
+                    if (root.TryGetProperty("candidates", out var candidates) && candidates.GetArrayLength() > 0)
+                    {
+                        var parts = candidates[0].GetProperty("content").GetProperty("parts");
+                        var sb = new StringBuilder();
+                        foreach (var p in parts.EnumerateArray())
+                        {
+                            if (p.TryGetProperty("text", out var t) && t.GetString() is string s)
+                                sb.Append(s);
+                        }
+                        if (sb.Length > 0)
+                        {
+                            RecordWorkingModel(model, wasFallback: i > 0);
+                            return sb.ToString();
+                        }
+                    }
+                }
+                catch (Exception ex)
                 {
-                    var parts = candidates[0].GetProperty("content").GetProperty("parts");
-                    var sb = new StringBuilder();
-                    foreach (var p in parts.EnumerateArray())
+                    lastError = $"I received a weird response I couldn't parse. Error: {ex.Message}";
+                    if (i + 1 < candidateModels.Count)
                     {
-                        if (p.TryGetProperty("text", out var t) && t.GetString() is string s)
-                            sb.Append(s);
+                        await Task.Delay(250);
+                        continue;
                     }
-                    if (sb.Length > 0) return sb.ToString();
                 }
+            }
 
-                return "I received an empty response from Gemini.";
-            }
-            catch (Exception ex)
-            {
-                return $"I received a weird response I couldn't parse. Error: {ex.Message}";
-            }
+            return lastError;
         }
 
         public static string BuildRequestJson(
@@ -359,13 +455,27 @@ namespace SlimeHelper
                 }
                 else
                 {
+                    var parts = new JsonArray();
+                    foreach (var img in turn.Images)
+                    {
+                        if (!string.IsNullOrWhiteSpace(img.Base64Data))
+                        {
+                            parts.Add(new JsonObject
+                            {
+                                ["inline_data"] = new JsonObject
+                                {
+                                    ["mime_type"] = string.IsNullOrWhiteSpace(img.MimeType) ? "image/png" : img.MimeType,
+                                    ["data"] = img.Base64Data
+                                }
+                            });
+                        }
+                    }
+                    parts.Add(new JsonObject { ["text"] = turn.Text });
+
                     contents.Add(new JsonObject
                     {
                         ["role"] = "user",
-                        ["parts"] = new JsonArray
-                        {
-                            new JsonObject { ["text"] = turn.Text }
-                        }
+                        ["parts"] = parts
                     });
                 }
             }
@@ -499,52 +609,90 @@ namespace SlimeHelper
             string bodyJson = BuildRequestJson(fullSystem, turns, tools);
             var client = AiMemoryStorage.SharedHttpClient;
             bool useStream = onTextDelta != null;
-            string endpoint = useStream
-                ? $"https://generativelanguage.googleapis.com/v1beta/models/{DefaultModel}:streamGenerateContent?alt=sse&key={apiKey}"
-                : $"https://generativelanguage.googleapis.com/v1beta/models/{DefaultModel}:generateContent?key={apiKey}";
+            var candidateModels = GetOrderedCandidateModels();
+            AiAgentResponse lastErrorResp = new("I received an empty response from Gemini.", [], IsError: true);
 
-            try
+            for (int i = 0; i < candidateModels.Count; i++)
             {
-                using var req = new HttpRequestMessage(HttpMethod.Post, endpoint)
-                {
-                    Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
-                };
+                string model = candidateModels[i];
+                string endpoint = useStream
+                    ? $"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={apiKey}"
+                    : $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apiKey}";
 
-                using var response = await client.SendAsync(
-                    req,
-                    useStream ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead,
-                    cancellationToken);
-
-                if (!useStream || !response.IsSuccessStatusCode)
+                try
                 {
-                    string jsonResponse = await response.Content.ReadAsStringAsync(cancellationToken);
-                    return ParseResponseJson(jsonResponse, onTextDelta);
+                    using var req = new HttpRequestMessage(HttpMethod.Post, endpoint)
+                    {
+                        Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
+                    };
+
+                    using var response = await client.SendAsync(
+                        req,
+                        useStream ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead,
+                        cancellationToken);
+
+                    if (!useStream || !response.IsSuccessStatusCode)
+                    {
+                        string jsonResponse = await response.Content.ReadAsStringAsync(cancellationToken);
+                        var parsed = ParseResponseJson(jsonResponse, onTextDelta);
+                        if (parsed.IsError && i + 1 < candidateModels.Count && ShouldFallbackOnError(parsed.Text, (int)response.StatusCode))
+                        {
+                            lastErrorResp = parsed;
+                            await Task.Delay(250, cancellationToken);
+                            continue;
+                        }
+                        if (!parsed.IsError)
+                        {
+                            RecordWorkingModel(model, wasFallback: i > 0);
+                        }
+                        return parsed;
+                    }
+
+                    var textAccumulator = new StringBuilder();
+                    var toolCalls = new List<AiToolCall>();
+                    using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                    using var reader = new StreamReader(stream, Encoding.UTF8);
+
+                    AiAgentResponse? streamErr = null;
+                    while (!cancellationToken.IsCancellationRequested &&
+                           await reader.ReadLineAsync(cancellationToken) is string line)
+                    {
+                        string trimmed = line.Trim();
+                        if (!trimmed.StartsWith("data:", StringComparison.Ordinal)) continue;
+                        string payload = trimmed[5..].Trim();
+                        if (string.IsNullOrEmpty(payload) || payload == "[DONE]") continue;
+
+                        using var doc = JsonDocument.Parse(payload);
+                        streamErr = ExtractCandidateFromElement(doc.RootElement, textAccumulator, toolCalls, onTextDelta);
+                        if (streamErr != null) break;
+                    }
+
+                    if (streamErr != null)
+                    {
+                        if (i + 1 < candidateModels.Count && textAccumulator.Length == 0 && ShouldFallbackOnError(streamErr.Text))
+                        {
+                            lastErrorResp = streamErr;
+                            await Task.Delay(250, cancellationToken);
+                            continue;
+                        }
+                        return streamErr;
+                    }
+
+                    RecordWorkingModel(model, wasFallback: i > 0);
+                    return new AiAgentResponse(textAccumulator.ToString(), toolCalls);
                 }
-
-                var textAccumulator = new StringBuilder();
-                var toolCalls = new List<AiToolCall>();
-                using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-                using var reader = new StreamReader(stream, Encoding.UTF8);
-
-                while (!cancellationToken.IsCancellationRequested &&
-                       await reader.ReadLineAsync(cancellationToken) is string line)
+                catch (Exception ex)
                 {
-                    string trimmed = line.Trim();
-                    if (!trimmed.StartsWith("data:", StringComparison.Ordinal)) continue;
-                    string payload = trimmed[5..].Trim();
-                    if (string.IsNullOrEmpty(payload) || payload == "[DONE]") continue;
-
-                    using var doc = JsonDocument.Parse(payload);
-                    var err = ExtractCandidateFromElement(doc.RootElement, textAccumulator, toolCalls, onTextDelta);
-                    if (err != null) return err;
+                    lastErrorResp = new AiAgentResponse($"I received a weird response I couldn't parse. Error: {ex.Message}", [], IsError: true);
+                    if (i + 1 < candidateModels.Count && !cancellationToken.IsCancellationRequested)
+                    {
+                        await Task.Delay(250, cancellationToken);
+                        continue;
+                    }
                 }
+            }
 
-                return new AiAgentResponse(textAccumulator.ToString(), toolCalls);
-            }
-            catch (Exception ex)
-            {
-                return new AiAgentResponse($"I received a weird response I couldn't parse. Error: {ex.Message}", [], IsError: true);
-            }
+            return lastErrorResp;
         }
 
         public static List<ChatMessage> GetHistory() => [];
@@ -554,11 +702,47 @@ namespace SlimeHelper
     public class ClaudeProvider : IAiProvider
     {
         public const string DefaultModel = "claude-5-5-sonnet";
+
+        public static readonly string[] FallbackModels =
+        [
+            "claude-5-5-sonnet",
+            "claude-3-7-sonnet-latest",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-sonnet-20240620",
+            "claude-3-5-haiku-latest"
+        ];
+
+        private static string? _preferredModel;
+        private static DateTime _preferredModelUntil = DateTime.MinValue;
         private static SlimeMemory _memory = new();
 
         public ClaudeProvider()
         {
             _memory = AiMemoryStorage.Load();
+        }
+
+        public static IReadOnlyList<string> GetOrderedCandidateModels()
+        {
+            if (!string.IsNullOrEmpty(_preferredModel) && DateTime.UtcNow < _preferredModelUntil)
+            {
+                var ordered = new List<string> { _preferredModel };
+                foreach (var m in FallbackModels)
+                {
+                    if (!string.Equals(m, _preferredModel, StringComparison.OrdinalIgnoreCase))
+                        ordered.Add(m);
+                }
+                return ordered;
+            }
+            return FallbackModels;
+        }
+
+        private static void RecordWorkingModel(string model, bool wasFallback)
+        {
+            if (wasFallback)
+            {
+                _preferredModel = model;
+                _preferredModelUntil = DateTime.UtcNow.AddMinutes(3);
+            }
         }
 
         public async Task<string> GetResponseAsync(string prompt, string apiKey)
@@ -585,66 +769,89 @@ namespace SlimeHelper
                                          $"Project: {_memory.CurrentProject}." +
                                          (!string.IsNullOrEmpty(factsString) ? $" Facts: {factsString}" : "");
 
-            var requestBody = new
+            var candidateModels = GetOrderedCandidateModels();
+            string lastError = "I received an empty response from Claude.";
+
+            for (int i = 0; i < candidateModels.Count; i++)
             {
-                model = DefaultModel,
-                max_tokens = 4096,
-                system = dynamicInstruction,
-                messages = new[]
+                string model = candidateModels[i];
+                var requestBody = new
                 {
-                    new { role = "user", content = prompt }
-                }
-            };
-
-            try
-            {
-                using var req = new HttpRequestMessage(HttpMethod.Post, url)
-                {
-                    Content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json")
-                };
-                req.Headers.Add("x-api-key", apiKey);
-                req.Headers.Add("anthropic-version", "2023-06-01");
-
-                using var response = await client.SendAsync(req);
-                var jsonResponse = await response.Content.ReadAsStringAsync();
-
-                using var doc = JsonDocument.Parse(jsonResponse);
-                var root = doc.RootElement;
-
-                if (root.TryGetProperty("error", out var errorElement))
-                {
-                    string msg = errorElement.TryGetProperty("message", out var m) ? m.GetString() ?? "Unknown error" : "Unknown error";
-                    return "API Error: " + msg;
-                }
-
-                if (root.TryGetProperty("content", out var contentArray) && contentArray.GetArrayLength() > 0)
-                {
-                    var sb = new StringBuilder();
-                    foreach (var block in contentArray.EnumerateArray())
+                    model,
+                    max_tokens = 4096,
+                    system = dynamicInstruction,
+                    messages = new[]
                     {
-                        if (block.TryGetProperty("text", out var t) && t.GetString() is string s)
-                            sb.Append(s);
+                        new { role = "user", content = prompt }
                     }
-                    if (sb.Length > 0) return sb.ToString();
-                }
+                };
 
-                return "I received an empty response from Claude.";
+                try
+                {
+                    using var req = new HttpRequestMessage(HttpMethod.Post, url)
+                    {
+                        Content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json")
+                    };
+                    req.Headers.Add("x-api-key", apiKey);
+                    req.Headers.Add("anthropic-version", "2023-06-01");
+
+                    using var response = await client.SendAsync(req);
+                    var jsonResponse = await response.Content.ReadAsStringAsync();
+
+                    using var doc = JsonDocument.Parse(jsonResponse);
+                    var root = doc.RootElement;
+
+                    if (root.TryGetProperty("error", out var errorElement))
+                    {
+                        string msg = errorElement.TryGetProperty("message", out var m) ? m.GetString() ?? "Unknown error" : "Unknown error";
+                        if (i + 1 < candidateModels.Count && GeminiProvider.ShouldFallbackOnError(msg, (int)response.StatusCode))
+                        {
+                            lastError = "API Error: " + msg;
+                            await Task.Delay(250);
+                            continue;
+                        }
+                        return "API Error: " + msg;
+                    }
+
+                    if (root.TryGetProperty("content", out var contentArray) && contentArray.GetArrayLength() > 0)
+                    {
+                        var sb = new StringBuilder();
+                        foreach (var block in contentArray.EnumerateArray())
+                        {
+                            if (block.TryGetProperty("text", out var t) && t.GetString() is string s)
+                                sb.Append(s);
+                        }
+                        if (sb.Length > 0)
+                        {
+                            RecordWorkingModel(model, wasFallback: i > 0);
+                            return sb.ToString();
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    lastError = $"I received a weird response I couldn't parse. Error: {ex.Message}";
+                    if (i + 1 < candidateModels.Count)
+                    {
+                        await Task.Delay(250);
+                        continue;
+                    }
+                }
             }
-            catch (Exception ex)
-            {
-                return $"I received a weird response I couldn't parse. Error: {ex.Message}";
-            }
+
+            return lastError;
         }
 
         public static string BuildRequestJson(
             string systemInstruction,
             IReadOnlyList<AiConversationTurn> turns,
             IReadOnlyList<AiToolDefinition>? tools,
-            bool stream = false)
+            bool stream = false,
+            string? modelOverride = null)
         {
             var root = new JsonObject
             {
-                ["model"] = DefaultModel,
+                ["model"] = string.IsNullOrWhiteSpace(modelOverride) ? DefaultModel : modelOverride,
                 ["max_tokens"] = 4096,
                 ["system"] = systemInstruction
             };
@@ -752,11 +959,44 @@ namespace SlimeHelper
                 }
                 else
                 {
-                    messages.Add(new JsonObject
+                    if (turn.Images.Count > 0)
                     {
-                        ["role"] = "user",
-                        ["content"] = turn.Text
-                    });
+                        var contentBlocks = new JsonArray();
+                        foreach (var img in turn.Images)
+                        {
+                            if (!string.IsNullOrWhiteSpace(img.Base64Data))
+                            {
+                                contentBlocks.Add(new JsonObject
+                                {
+                                    ["type"] = "image",
+                                    ["source"] = new JsonObject
+                                    {
+                                        ["type"] = "base64",
+                                        ["media_type"] = string.IsNullOrWhiteSpace(img.MimeType) ? "image/png" : img.MimeType,
+                                        ["data"] = img.Base64Data
+                                    }
+                                });
+                            }
+                        }
+                        contentBlocks.Add(new JsonObject
+                        {
+                            ["type"] = "text",
+                            ["text"] = string.IsNullOrWhiteSpace(turn.Text) ? "Describe or analyze this image." : turn.Text
+                        });
+                        messages.Add(new JsonObject
+                        {
+                            ["role"] = "user",
+                            ["content"] = contentBlocks
+                        });
+                    }
+                    else
+                    {
+                        messages.Add(new JsonObject
+                        {
+                            ["role"] = "user",
+                            ["content"] = turn.Text
+                        });
+                    }
                 }
             }
 
@@ -950,47 +1190,84 @@ namespace SlimeHelper
                 : $"{systemInstruction}\n\n{memoryPrefix}";
 
             bool useStream = onTextDelta != null;
-            string bodyJson = BuildRequestJson(fullSystem, turns, tools, stream: useStream);
-
             var client = AiMemoryStorage.SharedHttpClient;
+            var candidateModels = GetOrderedCandidateModels();
+            AiAgentResponse lastErrorResp = new("I received an empty response from Claude.", [], IsError: true);
 
-            try
+            for (int i = 0; i < candidateModels.Count; i++)
             {
-                using var req = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages")
-                {
-                    Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
-                };
-                req.Headers.Add("x-api-key", apiKey);
-                req.Headers.Add("anthropic-version", "2023-06-01");
+                string model = candidateModels[i];
+                string bodyJson = BuildRequestJson(fullSystem, turns, tools, stream: useStream, modelOverride: model);
 
-                using var response = await client.SendAsync(
-                    req,
-                    useStream ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead,
-                    cancellationToken);
-
-                if (!useStream || !response.IsSuccessStatusCode)
+                try
                 {
-                    string jsonResponse = await response.Content.ReadAsStringAsync(cancellationToken);
-                    return ParseResponseJson(jsonResponse, onTextDelta);
+                    using var req = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages")
+                    {
+                        Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
+                    };
+                    req.Headers.Add("x-api-key", apiKey);
+                    req.Headers.Add("anthropic-version", "2023-06-01");
+
+                    using var response = await client.SendAsync(
+                        req,
+                        useStream ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead,
+                        cancellationToken);
+
+                    if (!useStream || !response.IsSuccessStatusCode)
+                    {
+                        string jsonResponse = await response.Content.ReadAsStringAsync(cancellationToken);
+                        var parsed = ParseResponseJson(jsonResponse, onTextDelta);
+                        if (parsed.IsError && i + 1 < candidateModels.Count && GeminiProvider.ShouldFallbackOnError(parsed.Text, (int)response.StatusCode))
+                        {
+                            lastErrorResp = parsed;
+                            await Task.Delay(250, cancellationToken);
+                            continue;
+                        }
+                        if (!parsed.IsError)
+                        {
+                            RecordWorkingModel(model, wasFallback: i > 0);
+                        }
+                        return parsed;
+                    }
+
+                    using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                    using var reader = new StreamReader(stream, Encoding.UTF8);
+                    var sseState = new ClaudeSseState(onTextDelta);
+
+                    AiAgentResponse? streamErr = null;
+                    while (!cancellationToken.IsCancellationRequested &&
+                           await reader.ReadLineAsync(cancellationToken) is string line)
+                    {
+                        streamErr = sseState.ProcessLine(line);
+                        if (streamErr != null) break;
+                    }
+
+                    if (streamErr != null)
+                    {
+                        if (i + 1 < candidateModels.Count && GeminiProvider.ShouldFallbackOnError(streamErr.Text))
+                        {
+                            lastErrorResp = streamErr;
+                            await Task.Delay(250, cancellationToken);
+                            continue;
+                        }
+                        return streamErr;
+                    }
+
+                    RecordWorkingModel(model, wasFallback: i > 0);
+                    return sseState.Finish();
                 }
-
-                using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-                using var reader = new StreamReader(stream, Encoding.UTF8);
-                var sseState = new ClaudeSseState(onTextDelta);
-
-                while (!cancellationToken.IsCancellationRequested &&
-                       await reader.ReadLineAsync(cancellationToken) is string line)
+                catch (Exception ex)
                 {
-                    var err = sseState.ProcessLine(line);
-                    if (err != null) return err;
+                    lastErrorResp = new AiAgentResponse($"I received a weird response I couldn't parse. Error: {ex.Message}", [], IsError: true);
+                    if (i + 1 < candidateModels.Count && !cancellationToken.IsCancellationRequested)
+                    {
+                        await Task.Delay(250, cancellationToken);
+                        continue;
+                    }
                 }
+            }
 
-                return sseState.Finish();
-            }
-            catch (Exception ex)
-            {
-                return new AiAgentResponse($"I received a weird response I couldn't parse. Error: {ex.Message}", [], IsError: true);
-            }
+            return lastErrorResp;
         }
 
         public static List<ChatMessage> GetHistory() => [];

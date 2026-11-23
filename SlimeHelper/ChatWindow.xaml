@@ -285,6 +285,15 @@
                                                        Margin="8,0,0,0"/>
                                         </Grid>
 
+                                        <!-- Attached Image Thumbnail (Multimodal) -->
+                                        <Image Source="{Binding AttachedImage}"
+                                               Visibility="{Binding ImageVisibility}"
+                                               MaxHeight="160"
+                                               MaxWidth="360"
+                                               Stretch="Uniform"
+                                               Margin="0,2,0,6"
+                                               HorizontalAlignment="Left"/>
+
                                         <!-- Message Content (Selectable) -->
                                         <TextBox Text="{Binding Text, Mode=OneWay}"
                                                  Foreground="{Binding TextColor}"
@@ -332,6 +341,9 @@
                 <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                     <StackPanel Orientation="Horizontal">
                         <Button Content="❓ /help" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/help"/>
+                        <Button Content="☀️ /brief" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/brief"/>
+                        <Button Content="↩️ /undo" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/undo"/>
+                        <Button Content="🔧 /gh fix" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/gh fix"/>
                         <Button Content="💖 /mood" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/mood"/>
                         <Button Content="📝 /todo" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/todo"/>
                         <Button Content="✅ /todo done" Style="{StaticResource PillButtonStyle}" Click="QuickChip_Click" Tag="/todo done "/>
@@ -354,84 +366,131 @@
                     BorderBrush="#2C3044"
                     BorderThickness="0,1,0,0"
                     Padding="12,10">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-
-                    <!-- Text input -->
-                    <Border Grid.Column="0"
-                            Background="#14151E"
-                            BorderBrush="#383D56"
+                <StackPanel>
+                    <!-- Pending Image Attachment Badge -->
+                    <Border x:Name="PendingImageBanner"
+                            Background="#262B40"
+                            BorderBrush="#3D4666"
                             BorderThickness="1"
-                            CornerRadius="8"
-                            Padding="8,4">
+                            CornerRadius="6"
+                            Padding="8,4"
+                            Margin="0,0,0,6"
+                            Visibility="Collapsed">
                         <Grid>
-                            <!-- Watermark / Placeholder -->
-                            <TextBlock x:Name="PlaceholderText"
-                                       Text="Ask Slime anything or type /help... (Enter to send, Shift+Enter for newline)"
-                                       Foreground="#5B647A"
-                                       FontSize="13"
-                                       VerticalAlignment="Center"
-                                       Margin="4,0,0,0"
-                                       IsHitTestVisible="False"/>
-
-                            <TextBox x:Name="InputTextBox"
-                                     Background="Transparent"
-                                     Foreground="#FFFFFF"
-                                     CaretBrush="#82AAFF"
-                                     BorderThickness="0"
-                                     FontSize="13"
-                                     AcceptsReturn="True"
-                                     TextWrapping="Wrap"
-                                     MaxHeight="100"
-                                     VerticalScrollBarVisibility="Auto"
-                                     PreviewKeyDown="InputTextBox_PreviewKeyDown"
-                                     TextChanged="InputTextBox_TextChanged"/>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="PendingImageLabel"
+                                       Grid.Column="0"
+                                       Text="🖼️ Image attached (ready to send)"
+                                       Foreground="#A5B4FC"
+                                       FontSize="11.5"
+                                       FontWeight="SemiBold"
+                                       VerticalAlignment="Center"/>
+                            <Button Grid.Column="1"
+                                    Content="✕"
+                                    Style="{StaticResource WindowBtnStyle}"
+                                    Width="22"
+                                    Height="20"
+                                    Click="ClearImageAttachment_Click"
+                                    ToolTip="Remove attached image"/>
                         </Grid>
                     </Border>
 
-                    <!-- Send Button -->
-                    <Button x:Name="SendButton"
-                            Grid.Column="1"
-                            Width="44"
-                            Height="38"
-                            Margin="8,0,0,0"
-                            Background="#4CAF50"
-                            BorderThickness="0"
-                            Cursor="Hand"
-                            Click="SendButton_Click"
-                            ToolTip="Send (Enter)">
-                        <Button.Template>
-                            <ControlTemplate TargetType="Button">
-                                <Border Background="{TemplateBinding Background}"
-                                        CornerRadius="8"
-                                        SnapsToDevicePixels="True">
-                                    <TextBlock Text="➤"
-                                               FontSize="16"
-                                               FontWeight="Bold"
-                                               Foreground="#FFFFFF"
-                                               HorizontalAlignment="Center"
-                                               VerticalAlignment="Center"/>
-                                </Border>
-                            </ControlTemplate>
-                        </Button.Template>
-                        <Button.Style>
-                            <Style TargetType="Button">
-                                <Style.Triggers>
-                                    <Trigger Property="IsMouseOver" Value="True">
-                                        <Setter Property="Background" Value="#43A047"/>
-                                    </Trigger>
-                                    <Trigger Property="IsEnabled" Value="False">
-                                        <Setter Property="Background" Value="#2A3A2C"/>
-                                        <Setter Property="Opacity" Value="0.6"/>
-                                    </Trigger>
-                                </Style.Triggers>
-                            </Style>
-                        </Button.Style>
-                    </Button>
-                </Grid>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Text input -->
+                        <Border Grid.Column="0"
+                                Background="#14151E"
+                                BorderBrush="#383D56"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                Padding="8,4">
+                            <Grid>
+                                <!-- Watermark / Placeholder -->
+                                <TextBlock x:Name="PlaceholderText"
+                                           Text="Ask Slime anything, paste an image (Ctrl+V), or type /help..."
+                                           Foreground="#5B647A"
+                                           FontSize="13"
+                                           VerticalAlignment="Center"
+                                           Margin="4,0,0,0"
+                                           IsHitTestVisible="False"/>
+
+                                <TextBox x:Name="InputTextBox"
+                                         Background="Transparent"
+                                         Foreground="#FFFFFF"
+                                         CaretBrush="#82AAFF"
+                                         BorderThickness="0"
+                                         FontSize="13"
+                                         AcceptsReturn="True"
+                                         TextWrapping="Wrap"
+                                         MaxHeight="100"
+                                         VerticalScrollBarVisibility="Auto"
+                                         PreviewKeyDown="InputTextBox_PreviewKeyDown"
+                                         TextChanged="InputTextBox_TextChanged"/>
+                            </Grid>
+                        </Border>
+
+                        <!-- Attach Clipboard / File Image Button -->
+                        <Button x:Name="AttachImageButton"
+                                Grid.Column="1"
+                                Width="38"
+                                Height="38"
+                                Margin="6,0,0,0"
+                                Style="{StaticResource WindowBtnStyle}"
+                                Background="#262A3E"
+                                Content="📷"
+                                FontSize="14"
+                                Click="AttachImageButton_Click"
+                                ToolTip="Attach image from clipboard or file (Ctrl+V also works)"/>
+
+                        <!-- Send Button -->
+                        <Button x:Name="SendButton"
+                                Grid.Column="2"
+                                Width="44"
+                                Height="38"
+                                Margin="6,0,0,0"
+                                Background="#4CAF50"
+                                BorderThickness="0"
+                                Cursor="Hand"
+                                Click="SendButton_Click"
+                                ToolTip="Send (Enter)">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border Background="{TemplateBinding Background}"
+                                            CornerRadius="8"
+                                            SnapsToDevicePixels="True">
+                                        <TextBlock Text="➤"
+                                                   FontSize="16"
+                                                   FontWeight="Bold"
+                                                   Foreground="#FFFFFF"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center"/>
+                                    </Border>
+                                </ControlTemplate>
+                            </Button.Template>
+                            <Button.Style>
+                                <Style TargetType="Button">
+                                    <Style.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter Property="Background" Value="#43A047"/>
+                                        </Trigger>
+                                        <Trigger Property="IsEnabled" Value="False">
+                                            <Setter Property="Background" Value="#2A3A2C"/>
+                                            <Setter Property="Opacity" Value="0.6"/>
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+                    </Grid>
+                </StackPanel>
             </Border>
         </Grid>
     </Border>

@@ -4,6 +4,8 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 
 namespace SlimeHelper
 {
@@ -19,6 +21,8 @@ namespace SlimeHelper
 
         public string CurrentThread { get; private set; } = "General";
         private ChatUiMessage? _streamingMessage;
+        private AiImageAttachment? _pendingAttachment;
+        private ImageSource? _pendingPreviewImage;
 
         private bool _isBusy;
         public bool IsBusy
@@ -162,25 +166,34 @@ namespace SlimeHelper
         private async void SendMessage()
         {
             string input = InputTextBox.Text.Trim();
-            if (string.IsNullOrWhiteSpace(input) || IsBusy) return;
+            if ((string.IsNullOrWhiteSpace(input) && _pendingAttachment == null) || IsBusy) return;
 
             InputTextBox.Text = "";
             PlaceholderText.Visibility = Visibility.Visible;
 
-            // Handle Slash Commands
-            if (input.StartsWith("/"))
+            // Handle Slash Commands when no image is attached
+            if (input.StartsWith("/") && _pendingAttachment == null)
             {
                 await HandleCommandAsync(input);
                 return;
             }
 
+            var attached = _pendingAttachment;
+            var attachedImgSource = _pendingPreviewImage;
+            ClearPendingAttachment();
+
+            string effectivePrompt = string.IsNullOrWhiteSpace(input)
+                ? "Analyze this screenshot/image and explain what you see or any issues shown."
+                : input;
+
             // Normal AI Message
             Messages.Add(new ChatUiMessage
             {
                 Sender = "You",
-                Text = input,
+                Text = effectivePrompt,
                 IsUser = true,
-                Timestamp = DateTime.Now.ToString("HH:mm")
+                Timestamp = DateTime.Now.ToString("HH:mm"),
+                AttachedImage = attachedImgSource
             });
 
             ScrollToBottom();
@@ -197,8 +210,10 @@ namespace SlimeHelper
                 workingDir = boundPath;
             }
 
+            List<AiImageAttachment>? images = attached != null ? [attached] : null;
+
             // Pass source "ChatWindow" to avoid duplicate user echo
-            _mainWindow.ProcessAiRequest(input, workingDir: workingDir, requestedThread: CurrentThread, source: "ChatWindow");
+            _mainWindow.ProcessAiRequest(effectivePrompt, workingDir: workingDir, requestedThread: CurrentThread, source: "ChatWindow", images: images);
         }
 
         private async Task HandleCommandAsync(string commandText)
@@ -211,6 +226,9 @@ namespace SlimeHelper
                 AddSystemMessage(
                     "💡 Slime Assistant Commands:\n\n" +
                     "• /help — Show this help text\n" +
+                    "• /brief — Show daily briefing (Calendar, To-Dos, Dirty Repos, CI & Mood)\n" +
+                    "• /undo — Restore the most recently modified file from Slime's backup\n" +
+                    "• /compact — Roll older thread messages into a compact summary\n" +
                     "• /clear — Clear current chat screen\n" +
                     "• /todo — List all open '- [ ]' To-Do items from slime_notes.md and Obsidian\n" +
                     "• /todo <task> — Add a new '- [ ]' task to slime_notes.md\n" +
@@ -225,8 +243,33 @@ namespace SlimeHelper
                     "• /gh status — Show GitHub connection, current user, rate limits, and detected repo\n" +
                     "• /gh runs [branch] — View recent GitHub Actions workflow runs\n" +
                     "• /gh log <run_id> — View failure logs for a workflow run\n" +
+                    "• /gh fix — Diagnose the latest failed CI workflow run and propose a fix\n" +
                     "• /pr <title> [branch] — Create a GitHub Pull Request to main\n\n" +
-                    "✨ You can also mention #repo or @topic anytime in normal questions!");
+                    "✨ Tip: Press Ctrl+V to paste a screenshot or click 📷 to attach an image!");
+                return;
+            }
+
+            if (lower == "/brief")
+            {
+                AddSystemMessage("☀️ Compiling your daily briefing...");
+                string briefing = await _mainWindow.BuildDailyBriefingAsync(CurrentThread);
+                AddSystemMessage(briefing);
+                return;
+            }
+
+            if (lower == "/undo")
+            {
+                var (ok, restoredPath, msg) = _brainManager.UndoLastFileChange(CurrentThread, GetActiveRepoPath());
+                AddSystemMessage(ok ? $"↩️ {msg}" : $"⚠️ {msg}");
+                return;
+            }
+
+            if (lower == "/compact")
+            {
+                string summary = _brainManager.CompactThreadHistory(CurrentThread, 6);
+                AddSystemMessage(string.IsNullOrWhiteSpace(summary)
+                    ? "🧠 Thread history is already compact."
+                    : $"🧠 Thread history compacted! Rolling summary:\n{summary}");
                 return;
             }
 
@@ -621,6 +664,62 @@ namespace SlimeHelper
                 return;
             }
 
+            if (lower.StartsWith("/gh fix"))
+            {
+                var (cachedRun, cachedLog) = _mainWindow.GetLastFailedWorkflow();
+                GitHubWorkflowRun? targetRun = cachedRun;
+                string? targetLog = cachedLog;
+
+                var repoInfo = GetActiveRepo();
+                if (targetRun == null && repoInfo.HasValue)
+                {
+                    AddSystemMessage($"🔍 Looking for recent failed workflow runs in {repoInfo.Value.owner}/{repoInfo.Value.repo}...");
+                    string? token = GetGitHubToken();
+                    var runs = await _gitHubService.GetLatestRunsAsync(repoInfo.Value.owner, repoInfo.Value.repo, limit: 10, token: token);
+                    targetRun = runs.FirstOrDefault(r => string.Equals(r.Conclusion, "failure", StringComparison.OrdinalIgnoreCase) ||
+                                                         string.Equals(r.Conclusion, "timed_out", StringComparison.OrdinalIgnoreCase));
+                    if (targetRun != null)
+                    {
+                        var jobs = await _gitHubService.GetRunJobsAsync(repoInfo.Value.owner, repoInfo.Value.repo, targetRun.Id, token);
+                        var failedJob = jobs.FirstOrDefault(j => string.Equals(j.Conclusion, "failure", StringComparison.OrdinalIgnoreCase)) ?? jobs.FirstOrDefault();
+                        if (failedJob != null)
+                        {
+                            targetLog = await _gitHubService.GetJobLogTailAsync(repoInfo.Value.owner, repoInfo.Value.repo, failedJob.Id, maxLines: 100, token: token);
+                        }
+                    }
+                }
+
+                if (targetRun == null)
+                {
+                    AddSystemMessage("✅ No failed GitHub Actions workflow run found to diagnose!");
+                    return;
+                }
+
+                // Switch to matching bound repo thread if possible
+                string? runRepoName = GitHubService.TryGetRepoNameFromUrl(targetRun.HtmlUrl);
+                if (!string.IsNullOrEmpty(runRepoName))
+                {
+                    foreach (var kv in _brainManager.GetBoundRepos())
+                    {
+                        var boundGh = GitHubService.GetRepoInfo(kv.Value);
+                        if (boundGh.HasValue && string.Equals($"{boundGh.Value.owner}/{boundGh.Value.repo}", runRepoName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            SelectThread(kv.Key);
+                            break;
+                        }
+                    }
+                }
+
+                string fixPrompt = $"GitHub Actions workflow '{targetRun.Name}' (Run #{targetRun.Id}) failed on branch '{targetRun.HeadBranch}' (commit: {targetRun.DisplayTitle}).\n" +
+                                   (string.IsNullOrWhiteSpace(targetLog)
+                                       ? "Please inspect the repository files to diagnose what could cause the build or tests to fail and propose a fix."
+                                       : $"Here is the failure log tail:\n```\n{targetLog.Trim()}\n```\nPlease analyze the failure log, read the relevant source file(s), and explain or fix the root cause.");
+
+                InputTextBox.Text = fixPrompt;
+                SendMessage();
+                return;
+            }
+
             if (lower.StartsWith("/pr"))
             {
                 var repoInfo = GetActiveRepo();
@@ -731,11 +830,11 @@ namespace SlimeHelper
             if (!string.IsNullOrWhiteSpace(logSnippet))
             {
                 card += $"📋 Failure Log Snippet:\n```\n{logSnippet.Trim()}\n```\n\n" +
-                        $"💡 Ask Slime: \"Explain why this CI step failed and how to fix it\" or type /gh log {run.Id}";
+                        $"💡 Click `🔧 /gh fix` below (or type `/gh fix`) to have Slime diagnose and fix this failure!";
             }
             else
             {
-                card += $"💡 Type `/gh log {run.Id}` to view error logs, or ask Slime for help diagnosing!";
+                card += $"💡 Click `🔧 /gh fix` or type `/gh log {run.Id}` to diagnose the error logs!";
             }
 
             AddSystemMessage(card);
@@ -976,6 +1075,18 @@ namespace SlimeHelper
 
         private void InputTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
         {
+            if (e.Key == Key.V && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+            {
+                if (TryAttachClipboardImage())
+                {
+                    if (!Clipboard.ContainsText())
+                    {
+                        e.Handled = true;
+                    }
+                    return;
+                }
+            }
+
             if (e.Key == Key.Enter)
             {
                 if ((Keyboard.Modifiers & ModifierKeys.Shift) == 0)
@@ -983,6 +1094,103 @@ namespace SlimeHelper
                     e.Handled = true;
                     SendMessage();
                 }
+            }
+        }
+
+        private bool TryAttachClipboardImage()
+        {
+            try
+            {
+                if (!Clipboard.ContainsImage()) return false;
+                BitmapSource? bmp = Clipboard.GetImage();
+                if (bmp == null) return false;
+
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(bmp));
+                using var ms = new MemoryStream();
+                encoder.Save(ms);
+                byte[] bytes = ms.ToArray();
+                string base64 = Convert.ToBase64String(bytes);
+
+                ms.Position = 0;
+                var preview = new BitmapImage();
+                preview.BeginInit();
+                preview.CacheOption = BitmapCacheOption.OnLoad;
+                preview.StreamSource = ms;
+                preview.EndInit();
+                preview.Freeze();
+
+                _pendingAttachment = new AiImageAttachment("image/png", base64, $"Clipboard image ({bmp.PixelWidth}x{bmp.PixelHeight})");
+                _pendingPreviewImage = preview;
+                PendingImageLabel.Text = $"🖼️ Clipboard image attached ({bmp.PixelWidth}×{bmp.PixelHeight})";
+                PendingImageBanner.Visibility = Visibility.Visible;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void AttachImageButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (TryAttachClipboardImage())
+            {
+                return;
+            }
+
+            var dlg = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Select an image or screenshot to attach",
+                Filter = "Image Files (*.png;*.jpg;*.jpeg;*.webp;*.bmp)|*.png;*.jpg;*.jpeg;*.webp;*.bmp"
+            };
+
+            if (dlg.ShowDialog() == true && File.Exists(dlg.FileName))
+            {
+                try
+                {
+                    byte[] bytes = File.ReadAllBytes(dlg.FileName);
+                    string ext = Path.GetExtension(dlg.FileName).ToLowerInvariant();
+                    string mime = ext switch
+                    {
+                        ".jpg" or ".jpeg" => "image/jpeg",
+                        ".webp" => "image/webp",
+                        ".bmp" => "image/bmp",
+                        _ => "image/png"
+                    };
+
+                    var preview = new BitmapImage();
+                    preview.BeginInit();
+                    preview.CacheOption = BitmapCacheOption.OnLoad;
+                    preview.UriSource = new Uri(dlg.FileName);
+                    preview.EndInit();
+                    preview.Freeze();
+
+                    string fileName = Path.GetFileName(dlg.FileName);
+                    _pendingAttachment = new AiImageAttachment(mime, Convert.ToBase64String(bytes), fileName);
+                    _pendingPreviewImage = preview;
+                    PendingImageLabel.Text = $"🖼️ Attached: {fileName}";
+                    PendingImageBanner.Visibility = Visibility.Visible;
+                }
+                catch (Exception ex)
+                {
+                    AddSystemMessage($"⚠️ Could not attach image: {ex.Message}");
+                }
+            }
+        }
+
+        private void ClearImageAttachment_Click(object sender, RoutedEventArgs e)
+        {
+            ClearPendingAttachment();
+        }
+
+        private void ClearPendingAttachment()
+        {
+            _pendingAttachment = null;
+            _pendingPreviewImage = null;
+            if (PendingImageBanner != null)
+            {
+                PendingImageBanner.Visibility = Visibility.Collapsed;
             }
         }
 

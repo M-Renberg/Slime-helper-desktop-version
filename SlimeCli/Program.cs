@@ -78,9 +78,16 @@ namespace SlimeCli
                 case "bind":
                     if (args.Length < 2) { PrintUsage("slime bind <#tag>"); return; }
                     string tag = args[1];
-                    if (!tag.StartsWith("#")) tag = "#" + tag; // Säkerställ att det alltid är en hashtag
+                    if (!tag.StartsWith("#")) tag = "#" + tag;
                     string currentDir = Directory.GetCurrentDirectory();
                     await ForwardToDesktopAppAsync($"BIND_REPO:{tag}|{currentDir}", waitForReply: true);
+                    break;
+                case "brief":
+                    await ForwardToDesktopAppAsync("DAILY_BRIEF", waitForReply: true);
+                    break;
+                case "undo":
+                    string undoTag = args.Length > 1 ? args[1] : "";
+                    await ForwardToDesktopAppAsync($"UNDO_EDIT:{undoTag}", waitForReply: true);
                     break;
                 default:
                     string fullQuery = string.Join(" ", args);
@@ -117,6 +124,8 @@ namespace SlimeCli
             PrintCommand("slime skin <color>", "Change the Slime skin (e.g. Pink, Green, Default).");
             PrintCommand("slime analyze <file>", "Analyze a CSV dataset and generate a Jupyter Notebook.");
             PrintCommand("slime bind #<name>", "Bind repo to brain");
+            PrintCommand("slime brief", "Show your daily briefing (Calendar, To-Dos, Git & CI status).");
+            PrintCommand("slime undo [#tag]", "Restore the most recently edited file from Slime's backup.");
             PrintCommand("slime help", "Display this overview.");
             Console.WriteLine();
         }
@@ -566,9 +575,71 @@ namespace SlimeCli
             return string.Join(Environment.NewLine, lines).Trim();
         }
 
+        private static string LoadBrainRulesContext()
+        {
+            try
+            {
+                string? bankPath = null;
+                if (File.Exists(SettingsPath))
+                {
+                    using var settingsDoc = JsonDocument.Parse(File.ReadAllText(SettingsPath));
+                    if (settingsDoc.RootElement.TryGetProperty("ObsidianVaultPath", out var obsProp))
+                    {
+                        string obs = obsProp.GetString() ?? "";
+                        if (!string.IsNullOrWhiteSpace(obs) && Directory.Exists(obs))
+                        {
+                            string candidate = Path.Combine(obs, "SlimeBrain", "memory", "memory_bank.json");
+                            if (File.Exists(candidate)) bankPath = candidate;
+                        }
+                    }
+                }
+
+                if (bankPath == null)
+                {
+                    string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                    string candidate = Path.Combine(localAppData, "SlimeHelper", "SlimeBrain", "memory", "memory_bank.json");
+                    if (File.Exists(candidate)) bankPath = candidate;
+                }
+
+                if (bankPath == null || !File.Exists(bankPath)) return "";
+
+                using var bankDoc = JsonDocument.Parse(File.ReadAllText(bankPath));
+                if (!bankDoc.RootElement.TryGetProperty("Nodes", out var nodesArr) || nodesArr.ValueKind != JsonValueKind.Array)
+                    return "";
+
+                var lines = new List<string>();
+                foreach (var node in nodesArr.EnumerateArray())
+                {
+                    string cat = node.TryGetProperty("Category", out var cProp) ? cProp.GetString() ?? "Fact" : "Fact";
+                    if (cat is "UserPreference" or "Rule" or "Architecture" or "ProjectDecision")
+                    {
+                        string key = node.TryGetProperty("Key", out var kProp) ? kProp.GetString() ?? "" : "";
+                        string content = node.TryGetProperty("Content", out var cntProp) ? cntProp.GetString() ?? "" : "";
+                        if (!string.IsNullOrWhiteSpace(content))
+                        {
+                            lines.Add($"- [{cat}] {key}: {content}");
+                        }
+                    }
+                }
+
+                if (lines.Count == 0) return "";
+                return "\n\n[User Preferences & Project Rules from SlimeBrain]\n" + string.Join("\n", lines.Take(10));
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
         private static async Task<string> QueryAiDirectAsync(string prompt)
         {
             if (!File.Exists(SettingsPath)) return "Error: slime_settings.json not found.";
+
+            string brainRules = LoadBrainRulesContext();
+            if (!string.IsNullOrEmpty(brainRules))
+            {
+                prompt += brainRules;
+            }
 
             try
             {
@@ -598,62 +669,87 @@ namespace SlimeCli
                 if (isClaude)
                 {
                     string url = "https://api.anthropic.com/v1/messages";
-                    client.DefaultRequestHeaders.Add("x-api-key", key);
-                    client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
+                    string[] claudeModels = ["claude-5-5-sonnet", "claude-3-7-sonnet-latest", "claude-3-5-sonnet-20241022", "claude-3-5-sonnet-20240620"];
+                    string lastErr = "Error: No response generated by AI.";
 
-                    var body = new
+                    foreach (var model in claudeModels)
                     {
-                        model = "claude-5-5-sonnet",
-                        max_tokens = 4096,
-                        messages = new[]
+                        var body = new
                         {
-                            new { role = "user", content = prompt }
+                            model,
+                            max_tokens = 4096,
+                            messages = new[]
+                            {
+                                new { role = "user", content = prompt }
+                            }
+                        };
+
+                        using var req = new HttpRequestMessage(HttpMethod.Post, url)
+                        {
+                            Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json")
+                        };
+                        req.Headers.Add("x-api-key", key);
+                        req.Headers.Add("anthropic-version", "2023-06-01");
+
+                        using var response = await client.SendAsync(req);
+                        string json = await response.Content.ReadAsStringAsync();
+                        using var doc = JsonDocument.Parse(json);
+
+                        if (doc.RootElement.TryGetProperty("error", out var errorProp))
+                        {
+                            string msg = errorProp.TryGetProperty("message", out var m) ? m.GetString() ?? "Unknown error" : "Unknown error";
+                            lastErr = $"API Error: {msg}";
+                            if ((int)response.StatusCode is 401 or 403) return lastErr;
+                            continue;
                         }
-                    };
 
-                    var response = await client.PostAsync(url, new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
-                    string json = await response.Content.ReadAsStringAsync();
-                    using var doc = JsonDocument.Parse(json);
-
-                    if (doc.RootElement.TryGetProperty("error", out var errorProp))
-                    {
-                        string msg = errorProp.TryGetProperty("message", out var m) ? m.GetString() ?? "Unknown error" : "Unknown error";
-                        return $"API Error: {msg}";
+                        if (doc.RootElement.TryGetProperty("content", out var contentArray) && contentArray.GetArrayLength() > 0)
+                        {
+                            return contentArray[0]
+                                   .GetProperty("text")
+                                   .GetString() ?? "";
+                        }
                     }
 
-                    if (doc.RootElement.TryGetProperty("content", out var contentArray) && contentArray.GetArrayLength() > 0)
-                    {
-                        return contentArray[0]
-                               .GetProperty("text")
-                               .GetString() ?? "";
-                    }
-
-                    return "Error: No response generated by AI.";
+                    return lastErr;
                 }
                 else
                 {
-                    string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={key}";
+                    string[] geminiModels = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"];
                     var body = new { contents = new[] { new { parts = new[] { new { text = prompt } } } } };
-                    var response = await client.PostAsync(url, new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
+                    string serializedBody = JsonSerializer.Serialize(body);
+                    string lastErr = "Error: No response generated by AI.";
 
-                    string json = await response.Content.ReadAsStringAsync();
-                    using var doc = JsonDocument.Parse(json);
-
-                    if (doc.RootElement.TryGetProperty("candidates", out var candidates) && candidates.GetArrayLength() > 0)
+                    foreach (var model in geminiModels)
                     {
-                        return candidates[0]
-                               .GetProperty("content")
-                               .GetProperty("parts")[0]
-                               .GetProperty("text")
-                               .GetString() ?? "";
+                        string url = $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}";
+                        using var response = await client.PostAsync(url, new StringContent(serializedBody, Encoding.UTF8, "application/json"));
+
+                        string json = await response.Content.ReadAsStringAsync();
+                        using var doc = JsonDocument.Parse(json);
+
+                        if (doc.RootElement.TryGetProperty("candidates", out var candidates) && candidates.GetArrayLength() > 0)
+                        {
+                            return candidates[0]
+                                   .GetProperty("content")
+                                   .GetProperty("parts")[0]
+                                   .GetProperty("text")
+                                   .GetString() ?? "";
+                        }
+
+                        if (doc.RootElement.TryGetProperty("error", out var errorProp))
+                        {
+                            string msg = errorProp.TryGetProperty("message", out var m) ? m.GetString() ?? "Unknown error" : "Unknown error";
+                            lastErr = $"API Error: {msg}";
+                            if ((int)response.StatusCode is 401 or 403 || msg.Contains("API_KEY_INVALID", StringComparison.OrdinalIgnoreCase))
+                            {
+                                return lastErr;
+                            }
+                            continue;
+                        }
                     }
 
-                    if (doc.RootElement.TryGetProperty("error", out var errorProp))
-                    {
-                        return $"API Error: {errorProp.GetProperty("message").GetString()}";
-                    }
-
-                    return "Error: No response generated by AI.";
+                    return lastErr;
                 }
             }
             catch (Exception ex)

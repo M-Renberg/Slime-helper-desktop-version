@@ -26,6 +26,8 @@ namespace SlimeHelper
         public string Timestamp { get; set; } = DateTime.Now.ToString("HH:mm");
         public bool IsUser { get; set; }
         public bool IsSystem { get; set; }
+        public ImageSource? AttachedImage { get; set; }
+        public Visibility ImageVisibility => AttachedImage != null ? Visibility.Visible : Visibility.Collapsed;
 
         public HorizontalAlignment Alignment => IsUser ? HorizontalAlignment.Right : (IsSystem ? HorizontalAlignment.Center : HorizontalAlignment.Left);
 
